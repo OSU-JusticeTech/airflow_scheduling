@@ -205,3 +205,17 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Airflow metadata DB
+airflow.db
+airflow.sqlite
+
+# Airflow logs
+logs/
+*.log
+
+# Airflow config (if you have sensitive credentials)
+airflow.cfg
+
+# Airflow DAG runtime files
+*.airflowignore
