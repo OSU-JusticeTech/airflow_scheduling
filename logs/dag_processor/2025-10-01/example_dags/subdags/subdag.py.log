@@ -1,0 +1,1 @@
+{"timestamp":"2025-10-01T11:41:49.848384","level":"info","event":"Filling up the DagBag from /Users/yasashwininapa/Desktop/justicetech/venv/lib/python3.11/site-packages/airflow/example_dags/subdags/subdag.py","logger":"airflow.models.dagbag.DagBag"}
