@@ -3,7 +3,9 @@ from bs4 import BeautifulSoup
 
 from utils.data_insertion import LOG
 
-# --- parties ---
+"""
+Extract the parties table block.
+"""
 def extract_parties_from_text(text):
     parties = []
     party_pattern = re.compile(
@@ -20,7 +22,9 @@ def extract_parties_from_text(text):
         })
     return parties
 
-# --- attorneys ---
+"""
+Extract the attorney table block.
+"""
 def extract_attorneys_from_text(text):
     attorneys = []
     atty_pattern = re.compile(
@@ -40,11 +44,10 @@ def extract_attorneys_from_text(text):
         })
     return attorneys
 
-# --- disposition ---
+"""
+Extract the disposition table block.
+"""
 def extract_disposition_from_text(text):
-    """
-    Extract the disposition table block.
-    """
     start_marker = "Status Date Disposition Code Disposition Date Judge"
     end_marker = "Scroll to top of page"
 
@@ -70,11 +73,12 @@ def extract_disposition_from_text(text):
         "disposition_text": disposition_text
     }
 
-# --- docket entries ---
+
+"""
+Extract the docket table block.
+"""
 def extract_dockets_from_text(text):
-    """
-    Extract the docket table block.
-    """
+
     start_marker = "Docket Date Text Amount Balance"
     end_marker = "Scroll to top of page"
 
@@ -111,13 +115,12 @@ def extract_dockets_from_text(text):
 
 
 
-
+"""
+Extract structured info from raw HTML/text with proper stripping.
+Case title ends at 'Case Information'.
+Case description captures text after title up to the first structured section.
+"""
 def parse_case_html(text):
-    """
-    Extract structured info from raw HTML/text with proper stripping.
-    Case title ends at 'Case Information'.
-    Case description captures text after title up to the first structured section.
-    """
     result = {
         "case_number": None,
         "case_title": None,
@@ -135,10 +138,10 @@ def parse_case_html(text):
         soup = BeautifulSoup(text, "html.parser")
         raw_text = soup.get_text(separator="\n")  # Convert HTML to plain text
 
-    # collapse newlines to spaces for robust matching
+    # collapse newlines to spaces
     clean_text = " ".join(raw_text.splitlines())
 
-    # case number
+    # case #
     match = re.search(
         r"Case\s+(?:No\.?|Number)\s*[:\-]?\s*([0-9]{4}\s*[A-Z]{3}\s*\d{6})",
         clean_text,
