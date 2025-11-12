@@ -6,6 +6,9 @@ __pycache__/
 # C extensions
 *.so
 
+# raw parser file
+utils/parser_updated.py
+
 # Distribution / packaging
 .Python
 build/
