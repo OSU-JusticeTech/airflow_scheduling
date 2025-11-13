@@ -91,7 +91,7 @@ CREATE USER airflow_user WITH PASSWORD 'your_secure_password';
 GRANT ALL PRIVILEGES ON DATABASE justicetech_db TO airflow_user;
 ```
 
-# if all else fails...use postgres (main user, which is what currently what is being used on Yash's local)
+#### if all else fails...use postgres (main user, which is what currently what is being used on Yash's local)
 
 
 ### 2. Create Database Tables
@@ -266,15 +266,3 @@ GRANT USAGE ON SCHEMA public TO airflow_user;
 GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO airflow_user;
 GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO airflow_user;
 ```
-
-## Next Steps
-
-1. **Prepare HTML Files** - Place HTML case files in `~/Desktop/justicetech/cases`
-2. **Monitor DAG Execution** - Use the Airflow UI to track DAG runs and task execution
-3. **View Parsed Data** - Query the database to verify parsed data was inserted correctly:
-   ```sql
-   SELECT COUNT(*) FROM cases;
-   SELECT * FROM parties LIMIT 10;
-   ```
-4. **Customize Parsers** - Modify `utils/parsers.py` to handle additional case data types
-5. **Set Up Scheduling** - Configure DAG schedule interval in `dags/case_data_etl.py`
