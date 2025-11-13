@@ -8,6 +8,8 @@ This project uses Apache Airflow to orchestrate an ETL (Extract, Transform, Load
 airflow/
 ├── dags/                          # Airflow DAG definitions
 │   └── case_data_etl.py          # Main ETL DAG
+├── db_info/                      # database information
+│   └── schemas, diagrams, xslx    # diagrams and setup init database info
 ├── utils/                         # Utility modules for parsing and data insertion
 │   ├── parsers.py                # HTML parsing functions
 │   ├── parser_updated.py         # Updated parser with additional logic
@@ -18,7 +20,7 @@ airflow/
 ├── plugins/                       # Custom Airflow plugins (if any)
 ├── airflow.cfg                   # Airflow configuration file
 ├── requirements.txt              # Python dependencies
-└── README.txt                    # This file
+└── README.md                    # This file
 ```
 
 ## Prerequisites
