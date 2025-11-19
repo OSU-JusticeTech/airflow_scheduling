@@ -256,7 +256,13 @@ cat .env
 grep "dags_folder" airflow.cfg
 
 # Ensure AIRFLOW_HOME is set correctly
-export AIRFLOW_HOME=/Users/yasashwininapa/airflow
+export AIRFLOW_HOME=/Users/your-username-path-to-airflow/airflow
+```
+
+If you want this to persist forever, add it to:
+
+```bash
+~/.zshrc
 ```
 
 ### Issue: "Permission denied" for airflow_user

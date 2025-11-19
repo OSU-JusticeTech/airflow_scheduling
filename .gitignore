@@ -222,3 +222,9 @@ airflow.cfg
 
 # Airflow DAG runtime files
 *.airflowignore
+
+#  Plugins directory
+plugins/
+
+
+
