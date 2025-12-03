@@ -6,6 +6,7 @@ import psycopg2
 from bs4 import BeautifulSoup
 import os
 
+# change this to your local path where HTML files are stored -- and consider moving it to .env variables
 CASES_FILE_DIRECTORY = os.path.expanduser("~/Desktop/justicetech/cases")
 BATCH_SIZE = 1000
 # under public schema now 
@@ -75,3 +76,5 @@ with DAG(
         task_id="batch_html_to_postgres",
         python_callable=batch_html_to_postgres
     )
+    
+    

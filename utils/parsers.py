@@ -37,7 +37,7 @@ def extract_attorneys_from_text(text):
         state_zip = city_state_zip[1].strip() if len(city_state_zip) > 1 else None
         attorneys.append({
             "party_type": m.group("party_type").title(),
-            "name": m.group("name").strip(),
+            "attorney_name": m.group("name").strip(),
             "address": m.group("address").strip(),
             "city": city,
             "state_zip": state_zip
@@ -51,27 +51,145 @@ def extract_disposition_from_text(text):
     start_marker = "Status Date Disposition Code Disposition Date Judge"
     end_marker = "Scroll to top of page"
 
+    # get the block of text for disposition
     start_idx = text.find(start_marker)
     if start_idx == -1:
-        LOG.debug("[debug] disposition table header not found")
-        return None
+         LOG.debug("[debug] disposition table header not found")
+         return None
 
-    # slice text from header onward
-    disposition_text = text[start_idx:]
+    disposition_text = text[start_idx + len(start_marker):]
     end_idx = disposition_text.find(end_marker)
     if end_idx != -1:
         disposition_text = disposition_text[:end_idx].strip()
 
-    # try to extract first status and date from this block
-    status_match = re.search(r"(CLOSED|OPEN|PENDING|DISMISSED)\s+([0-9]{2}/[0-9]{2}/[0-9]{4})", disposition_text, re.I)
-    status = status_match.group(1).upper() if status_match else None
-    status_date = status_match.group(2) if status_match else None
+    # whitespace normalization
+    clean_text = re.sub(r'\s+', ' ', disposition_text).strip()
 
-    return {
-        "status": status,
-        "status_date": status_date,
-        "disposition_text": disposition_text
-    }
+    # regex to capture single disposition record
+    disposition_pattern = re.compile(
+        r"^(?P<status>CLOSED|OPEN|PENDING|DISMISSED|JUDGMENT|OTHER\sTERMINATION)[/\s]*" 
+        r"(?P<status_date>\d{2}/\d{2}/\d{4})\s*"
+        r"(?P<code_description>[A-Z\s]+?)" 
+        r"(?P<disposition_date>\d{2}/\d{2}/\d{4})\s*"
+        r"(?P<judge>[A-Z\s]+)",
+        re.I
+    )
+    
+    m = disposition_pattern.match(clean_text)
+    
+    if m:
+        def normalize_date(date_str):
+            try:
+                m, d, y = date_str.split('/')
+                return f"{y}-{m}-{d}"
+            except:
+                return None
+                
+        # return record dict
+        return {
+            "disposition_status": m.group("status").upper(),
+            "disposition_status_date": normalize_date(m.group("status_date")),
+            "disposition_code_text": m.group("code_description").strip(),
+            "disposition_date": normalize_date(m.group("disposition_date")),
+            "judge": m.group("judge").strip(),
+            # debugging info data
+            "disposition_text": clean_text
+        }
+    else:
+        LOG.debug(f"[debug] Disposition record match failed on text: {clean_text[:100]}")
+        return None
+    
+
+'''
+Extract the events table block.
+'''
+def extract_events_from_text(text):
+    LOG.info("[checkpoint] Starting event extraction.")
+    events = []
+
+    header = "Events Event Date Start End Judge Ct.Rm. Result"
+    idx = text.find(header)
+    if idx == -1:
+        # print("[DEBUG] Events: header not found")
+        return []
+
+    block = text[idx + len(header):]
+
+    # cut at Docket or Scroll — leave spacing intact
+    end_match = re.search(r"(Docket|Scroll to top)", block, re.I)
+    if end_match:
+        block = block[:end_match.start()]
+
+    # print("\n[DEBUG] Raw Events Block (first 200 chars):")
+    # print(block[:200])
+    # print("---")
+
+    # extract event chunks safely -- no collapsing of spaces TOKENIZING 
+    tokens = re.split(r"(\s+)", block)  # keep whitespace
+    # Example: ["EVICTION", " ", "HEARING", " ", "-", " ", "FCRS", " ", "05/22/2023", ...]
+
+    # Helper to detect date token
+    def is_date(tok):
+        return re.match(r"\d{2}/\d{2}/\d{4}", tok) is not None
+
+    # find date positions (event boundaries)
+    date_positions = [i for i, tok in enumerate(tokens) if is_date(tok)]
+
+    if not date_positions:
+        print("[DEBUG] No dates found → no events")
+        return []
+
+    # Add an end marker
+    date_positions.append(len(tokens))
+
+    # print(f"[DEBUG] Found {len(date_positions)-1} event boundaries")
+
+    # extract event chunks safely -- no collapsing of spaces
+    chunks = []
+    for idx in range(len(date_positions) - 1):
+        start = date_positions[idx] - 1  
+        while start > 0 and not tokens[start].strip():
+            start -= 1 
+
+        end = date_positions[idx + 1] - 1
+        chunk = "".join(tokens[start:end]).strip()
+        chunks.append(chunk)
+
+    print(f"[DEBUG] Extracted {len(chunks)} isolated event chunks")
+
+    # parse each chunk cleanly
+    chunk_regex = re.compile(
+        r"(?P<name>.*?)\s+"
+        r"(?P<date>\d{2}/\d{2}/\d{4})\s+"
+        r"(?P<start>\d{2}:\d{2}\s*[AP]M)\s+"
+        r"(?P<end>\d{2}:\d{2}\s*[AP]M)\s+"
+        r"(?P<judge>\S+)\s+"
+        r"(?P<courtroom>\S+)\s+"
+        r"(?P<result>.*)",
+        re.DOTALL
+    )
+
+    for chunk in chunks:
+        # print("[DEBUG] Parsing chunk:", chunk[:120], "...")
+        m = chunk_regex.match(chunk)
+        if not m:
+            print("[DEBUG] Chunk parse FAIL:", chunk[:100])
+            continue
+
+        mm, dd, yyyy = m.group("date").split("/")
+        events.append({
+            "event_name": m.group("name").strip(),
+            "date": f"{yyyy}-{mm}-{dd}",
+            "event_start_time": m.group("start"),
+            "event_end_time": m.group("end"),
+            "event_judge": m.group("judge"),
+            "event_courtroom": m.group("courtroom"),
+            "event_result": m.group("result").strip(),
+        })
+
+    LOG.info("[checkpoint] Extracted %d events", len(events))
+    return events
+
 
 
 """
@@ -92,13 +210,64 @@ def extract_dockets_from_text(text):
     if end_idx != -1:
         docket_text = docket_text[:end_idx].strip()
 
-    # now extract each row
+    # Clean up excess whitespace/newlines into single spaces
+    clean_text = re.sub(r'\s+', ' ', docket_text).strip()
+
     dockets = []
-    # match lines like: 02/24/2025 DISMISSED BY PLAINTIFF ... (date first, then text)
-    row_pattern = re.compile(r"(\d{2}/\d{2}/\d{4})\s+(.+?)(?:\s{2,}|$)", re.I)
-    for m in row_pattern.finditer(docket_text):
-        date_str = m.group(1).strip()
-        entry_text = m.group(2).strip()
+    
+    # 💡 REVISED REGEX: Look for the date, followed by text, then two monetary values at the end.
+    # The money pattern: [$]?\d+\.\d{2} matches $123.00, $0.00, 123.00, etc.
+    # We use a large, optional space capture (\s{1,20}?) to separate text from amount.
+    row_pattern = re.compile(
+        # Group 1: Date (MM/DD/YYYY)
+        r"(?P<date>\d{2}/\d{2}/\d{4})\s*"
+        
+        # Group 2: Text (Captures everything until it hits the final financial columns)
+        # We look for text that precedes two floating point numbers/currency.
+        r"(?P<entry_text>.+?)\s*"
+
+        # Group 3: Amount (Matches money format - e.g., $123.00 or just 123.00)
+        # Financial columns are often non-greedily separated by spaces.
+        r"(?P<amount>\$?\d+\.\d{2})\s*"
+        
+        # Group 4: Balance (Matches money format)
+        r"(?P<balance>\$?\d+\.\d{2})\s*",
+        
+        re.I
+    )
+    
+    # Check if a specific row in your data (like the last one) has no financial data
+    # The last entry in your sample: "PETITION IN FE&D FILED $123.00 $0.00 Receipt: 24641856 Date: 03/20/2024"
+    
+    # Use a simpler date-to-date pattern and then process the interior if the full row is too complex:
+    # ------------------------------------------------------------------------------------------------
+    date_split_pattern = re.compile(r"(\d{2}/\d{2}/\d{4})(.+?)(?=\d{2}/\d{2}/\d{4}|$)", re.DOTALL)
+    docket_chunks = date_split_pattern.findall(docket_text)
+    
+    # Define inner pattern for amount/balance inside the text chunk
+    inner_pattern = re.compile(
+        r"(?P<text>.+?)\s*"
+        r"(?P<amount>\$?\d+\.\d{2})\s*"
+        r"(?P<balance>\$?\d+\.\d{2})",
+        re.I | re.DOTALL
+    )
+    
+    for date_str, chunk_text in docket_chunks:
+        amount = None
+        balance = None
+        entry_text = chunk_text.strip()
+        
+        # Try to find the financial data at the end of the chunk
+        m = inner_pattern.search(entry_text)
+        
+        if m:
+            # If financial data is found, split the entry text accordingly
+            amount = m.group("amount").strip()
+            balance = m.group("balance").strip()
+            # The entry text is everything *before* the amount field was captured
+            entry_text = entry_text[:m.start("amount")].strip()
+            
+        
         # normalize date
         m_parts = date_str.split("/")
         if len(m_parts) == 3:
@@ -106,13 +275,15 @@ def extract_dockets_from_text(text):
             formatted_date = f"{y_}-{int(m_):02d}-{int(d_):02d}"
         else:
             formatted_date = None
+        
         dockets.append({
-            "date": formatted_date,
-            "entry": entry_text
+            "docket_date": formatted_date,
+            "docket_text": entry_text,
+            "docket_amount": amount,
+            "docket_balance": balance
         })
 
     return dockets
-
 
 
 """
@@ -130,7 +301,8 @@ def parse_case_html(text):
         "parties": [],
         "attorneys": [],
         "disposition": None, 
-        "dockets": []
+        "dockets": [],
+        "events": []
     }
 
     raw_text = text
@@ -183,5 +355,6 @@ def parse_case_html(text):
     result["attorneys"] = extract_attorneys_from_text(raw_text) 
     result["disposition"] = extract_disposition_from_text(raw_text)
     result["dockets"] = extract_dockets_from_text(raw_text)
+    result["events"] = extract_events_from_text(raw_text)
 
     return result
