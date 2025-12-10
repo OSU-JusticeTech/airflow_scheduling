@@ -1,5 +1,6 @@
 import os
 from logging.config import fileConfig
+from urllib.parse import quote_plus
 
 from alembic import context
 from sqlalchemy import create_engine, pool
@@ -12,7 +13,7 @@ config = context.config
 fileConfig(config.config_file_name)
 
 # Load .env
-load_dotenv()
+load_dotenv(dotenv_path="/Users/dishapatel/airflow_scheduling/.env")
 
 DB_USER = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
@@ -20,10 +21,21 @@ DB_HOST = os.getenv("DB_HOST")
 DB_PORT = os.getenv("DB_PORT")
 DB_NAME = os.getenv("DB_NAME")
 
+# Debug print to verify environment variables
+print(f"DB_USER: {DB_USER}")
+print(f"DB_PASSWORD: {DB_PASSWORD}")
+print(f"DB_HOST: {DB_HOST}")
+print(f"DB_PORT: {DB_PORT}")
+print(f"DB_NAME: {DB_NAME}")
+
+# URL-encode the password to handle special characters like @
+encoded_password = quote_plus(DB_PASSWORD) if DB_PASSWORD else ""
+
 DATABASE_URL = (
-    f"postgresql+psycopg2://{DB_USER}:{DB_PASSWORD}"
+    f"postgresql+psycopg2://{DB_USER}:{encoded_password}"
     f"@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 )
+print(f"DATABASE_URL: {DATABASE_URL}")
 
 # Import Base + all models
 from models.base import Base
