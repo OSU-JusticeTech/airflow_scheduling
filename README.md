@@ -37,6 +37,7 @@ airflow/
 git clone https://github.com/OSU-JusticeTech/airflow_scheduling.git
 cd airflow_scheduling
 ```
+*** update airflow.cfg with correct paths for your enviornment 
 
 ### 2. Create a Python Virtual Environment
 
@@ -59,6 +60,8 @@ The `requirements.txt` includes:
 - BeautifulSoup4 (for HTML parsing)
 - Flask and related web framework packages
 - And other supporting libraries
+
+*** should confirm that the package versions in your environment align with the versions specified in requirements.txt
 
 ### 4. Configure Environment Variables
 
@@ -160,7 +163,9 @@ You can also set a one-off URL when running Alembic commands by editing `alembic
 ```bash
 # Apply all available migrations
 alembic upgrade head
+```
 
+```bash
 # Show current revision
 alembic current
 

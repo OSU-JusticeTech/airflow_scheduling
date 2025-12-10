@@ -1,6 +1,8 @@
 from sqlalchemy import Column, BigInteger, String, Date, TIMESTAMP, ForeignKey, Identity
 from sqlalchemy.orm import relationship
 from .base import Base
+from sqlalchemy import func
+
 
 class Disposition(Base):
     __tablename__ = "disposition"
@@ -14,9 +16,10 @@ class Disposition(Base):
     disposition_date = Column(Date)
     judge = Column(String)
 
-    created = Column(TIMESTAMP)
-    created_by = Column(String)
-    updated = Column(TIMESTAMP)
-    updated_by = Column(String)
+    created = Column(TIMESTAMP(timezone=True), server_default=func.now())
+    created_dag_run_id = Column(String)
+    
+    updated = Column(TIMESTAMP(timezone=True), onupdate=func.now())
+    updated_task_id = Column(String)
 
     case = relationship("Case", back_populates="dispositions")
