@@ -215,7 +215,7 @@ def extract_dockets_from_text(text):
 
     dockets = []
     
-    # 💡 REVISED REGEX: Look for the date, followed by text, then two monetary values at the end.
+    # Look for the date, followed by text, then two monetary values at the end.
     # The money pattern: [$]?\d+\.\d{2} matches $123.00, $0.00, 123.00, etc.
     # We use a large, optional space capture (\s{1,20}?) to separate text from amount.
     row_pattern = re.compile(

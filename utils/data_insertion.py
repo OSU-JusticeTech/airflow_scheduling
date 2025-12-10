@@ -56,7 +56,7 @@ def update_pipeline_status_to_valid(cur, case_ids, task_id):
     # Convert the list of IDs into a format suitable for the WHERE clause
     id_list_str = tuple(case_ids)
     
-    # 💡 SQL Code for Status Update:
+    # sql status code
     cur.execute("""
         UPDATE cases
         SET
@@ -248,7 +248,7 @@ def insert_docket_entries(cur, case_id, docket_list):
     for docket in docket_list:
         LOG.info("[checkpoint] inserting docket for case_id: %s", case_id)
         
-        # 💡 FIX: Apply the cleanup function to amount and balance before execution
+        # Apply the cleanup function to amount and balance before execution
         docket_amount = clean_currency(docket.get("docket_amount"))
         docket_balance = clean_currency(docket.get("docket_balance"))
         cur.execute("""

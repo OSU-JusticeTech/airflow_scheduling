@@ -31,7 +31,7 @@ def parse_and_insert_from_db(batch_size=5, dag_run_id=None, task_id=None):
     
     config = create_postgres_config()
     conn = psycopg2.connect(**config)
-    print("✓ Database connection established")
+    print(" Database connection established")
 
     try:
         with conn.cursor() as cur:
@@ -100,7 +100,7 @@ def parse_and_insert_from_db(batch_size=5, dag_run_id=None, task_id=None):
                     LOG.error("[error] failed to process file %s: %s", file_name, e, exc_info=True)
     finally:
         conn.close()
-        print("✓ Database connection closed")
+        print("Database connection closed")
         LOG.info("[checkpoint] connection closed after batch processing")
 
 if __name__ == "__main__":
