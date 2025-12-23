@@ -7,6 +7,7 @@ class Address(Base):
 
     address_id = Column(BigInteger, primary_key=True)
     case_number = Column(String)  # Link to raw_cases
+    party_name = Column(String)  # Name of the party associated with this address
     address_type = Column(String)
     address_line1 = Column(String)
     address_line2 = Column(String)
@@ -17,5 +18,6 @@ class Address(Base):
     # Geolocation fields
     latitude = Column(Float)
     longitude = Column(Float)
-    geocoded_at = Column(DateTime, default=func.now())
-    geocode_status = Column(String)  # 'success', 'failed', 'mock', etc.
+    geocoded_at = Column(DateTime)
+    geocode_status = Column(String)  # 'success', 'failed', 'extracted', 'no_results', 'api_error', etc.
+    created_at = Column(DateTime, default=func.now())

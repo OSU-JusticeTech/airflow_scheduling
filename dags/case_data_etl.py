@@ -32,7 +32,7 @@ DB_NAME = os.getenv("DB_NAME")
 
 
 def batch_html_to_postgres():
-    # works only when given provileges such as superuser --FIX: still updating to user airflow_user to work
+    # works only when given provileges such as superuser 
     conn = psycopg2.connect(
         dbname=DB_NAME,
         user=DB_USER,
@@ -57,7 +57,6 @@ def batch_html_to_postgres():
             try:
                 with open(file_path, "r", encoding="utf-8") as f:
                     content = f.read()
-                    # Extract case number from filename (e.g., "2025_CVG_006499.html" -> "2025_CVG_006499")
                     case_number = file_name.replace('.html', '')
                     records.append((case_number, content))
             except Exception as e:
@@ -89,7 +88,7 @@ def extract_and_geocode_addresses():
     )
     cur = conn.cursor()
     
-    # Get cases that don't have addresses extracted yet
+    # get cases that don't have addresses extracted yet
     cur.execute("""
         SELECT r.case_number, r.raw_html 
         FROM raw_cases r
@@ -110,17 +109,16 @@ def extract_and_geocode_addresses():
                 try:
                     cur.execute("""
                         INSERT INTO address (case_number, address_type, address_line1, city, state, 
-                                           latitude, longitude, geocode_status)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                                           postal_code, geocode_status)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
                     """, (
                         case_number,
                         addr.get('address_type', 'unknown'),
                         addr.get('address_line1', ''),
                         addr.get('city', ''),
                         addr.get('state', ''),
-                        0.0,  # Mock latitude
-                        0.0,  # Mock longitude
-                        'mock'  # Mock geocoding status
+                        addr.get('postal_code', ''),
+                        'extracted'  # Status indicates address was extracted but not yet geocoded
                     ))
                     total_addresses += 1
                 except Exception as e:
@@ -133,13 +131,10 @@ def extract_and_geocode_addresses():
     cur.close()
     conn.close()
     
-    print(f"✅ Address extraction completed! Inserted {total_addresses} addresses with mock geocoding (0,0)")
-
 
 def extract_addresses_simple(html_content, case_number):
     addresses = []
     
-    # Simple regex patterns for addresses
     address_patterns = [
         r'(\d+\s+[A-Za-z\s]+(?:Street|St|Avenue|Ave|Road|Rd|Drive|Dr|Lane|Ln|Boulevard|Blvd))',
         r'(\d+\s+[A-Za-z\s]+\s+(?:OH|Ohio)\s+\d{5})'
@@ -161,7 +156,7 @@ def extract_addresses_simple(html_content, case_number):
                 'postal_code': city_match.group(3) if city_match and city_match.group(3) else ''
             })
     
-    return addresses[:5]  # Limit to 5 addresses per case
+    return addresses[:5] 
 
 
 with DAG(
@@ -183,7 +178,7 @@ with DAG(
         python_callable=extract_and_geocode_addresses
     )
 
-    # Set task dependencies
+    # set task dependencies
     task_batch_html >> task_extract_addresses
     
     
