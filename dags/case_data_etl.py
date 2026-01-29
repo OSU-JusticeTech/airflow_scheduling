@@ -32,7 +32,9 @@ DB_NAME = os.getenv("DB_NAME")
 
 
 def batch_html_to_postgres():
-    # works only when given provileges such as superuser 
+    """Load HTML files to postgres and detect changes for re-processing"""
+    import hashlib
+    
     conn = psycopg2.connect(
         dbname=DB_NAME,
         user=DB_USER,
@@ -46,11 +48,16 @@ def batch_html_to_postgres():
     html_files = [f for f in os.listdir(CASES_FILE_DIRECTORY) if f.endswith(".html")]
     total_files = len(html_files)
     print(f"Found {total_files} HTML files.")
+    
+    new_files = 0
+    updated_files = 0
+    unchanged_files = 0
 
     # process files in batches
     for i in range(0, total_files, BATCH_SIZE):
         batch = html_files[i:i+BATCH_SIZE]
-        records = []
+        records_to_insert = []
+        records_to_update = []
 
         for file_name in batch:
             file_path = os.path.join(CASES_FILE_DIRECTORY, file_name)
@@ -58,18 +65,67 @@ def batch_html_to_postgres():
                 with open(file_path, "r", encoding="utf-8") as f:
                     content = f.read()
                     case_number = file_name.replace('.html', '')
-                    records.append((case_number, content))
+                    
+                    # Create content hash for change detection
+                    content_hash = hashlib.md5(content.encode('utf-8')).hexdigest()
+                    
+                    # Check if case already exists and if content has changed
+                    cur.execute("""
+                        SELECT raw_html, content_hash 
+                        FROM raw_cases 
+                        WHERE case_number = %s
+                    """, (case_number,))
+                    
+                    existing_record = cur.fetchone()
+                    
+                    if existing_record is None:
+                        # New file - insert it
+                        records_to_insert.append((case_number, content, content_hash))
+                        new_files += 1
+                        print(f"✅ NEW: {case_number}")
+                        
+                    elif existing_record[1] != content_hash:
+                        # File has changed - update and mark for re-processing
+                        records_to_update.append((content, content_hash, case_number))
+                        updated_files += 1
+                        print(f"🔄 CHANGED: {case_number} - will re-process addresses")
+                        
+                        # Remove existing addresses for this case so they get re-extracted
+                        cur.execute("""
+                            DELETE FROM address WHERE case_number = %s
+                        """, (case_number,))
+                        
+                    else:
+                        # File unchanged
+                        unchanged_files += 1
+                        
             except Exception as e:
-                print(f"Error processing {file_name}: {e}")
+                print(f"❌ Error processing {file_name}: {e}")
 
-        # bulk insert into postgres - match existing table structure
-        cur.executemany(f"""
-            INSERT INTO {TABLE_NAME} (case_number, raw_html)
-            VALUES (%s, %s)
-            ON CONFLICT (case_number) DO NOTHING
-        """, records)
+        # Bulk insert new records
+        if records_to_insert:
+            cur.executemany("""
+                INSERT INTO raw_cases (case_number, raw_html, content_hash, last_updated)
+                VALUES (%s, %s, %s, NOW())
+            """, records_to_insert)
+            
+        # Bulk update changed records
+        if records_to_update:
+            cur.executemany("""
+                UPDATE raw_cases 
+                SET raw_html = %s, content_hash = %s, last_updated = NOW()
+                WHERE case_number = %s
+            """, records_to_update)
+
         conn.commit()
-        print(f"Inserted batch {i // BATCH_SIZE + 1} ({len(records)} records)")
+        print(f"📊 Batch {i // BATCH_SIZE + 1} processed: {len(records_to_insert)} new, {len(records_to_update)} updated")
+
+    # Final summary
+    print(f"\n📈 HTML PROCESSING COMPLETE:")
+    print(f"  📄 Total files processed: {total_files}")
+    print(f"  ✅ New files: {new_files}")
+    print(f"  🔄 Changed files (will re-process): {updated_files}")
+    print(f"  ⏹️ Unchanged files: {unchanged_files}")
 
     cur.close()
     conn.close()
