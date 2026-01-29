@@ -1,5 +1,5 @@
 import psycopg2
-from load_parse_data import create_postgres_config
+from utils.data_insertion import create_postgres_config
 
 config = create_postgres_config()
 conn = psycopg2.connect(**config)
