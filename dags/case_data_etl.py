@@ -66,10 +66,10 @@ def batch_html_to_postgres():
                     content = f.read()
                     case_number = file_name.replace('.html', '')
                     
-                    # Create content hash for change detection
+                    # create content hash for change detection
                     content_hash = hashlib.md5(content.encode('utf-8')).hexdigest()
                     
-                    # Check if case already exists and if content has changed
+                    # check if case already exists and if content has changed
                     cur.execute("""
                         SELECT raw_html, content_hash 
                         FROM raw_cases 
@@ -79,37 +79,31 @@ def batch_html_to_postgres():
                     existing_record = cur.fetchone()
                     
                     if existing_record is None:
-                        # New file - insert it
                         records_to_insert.append((case_number, content, content_hash))
                         new_files += 1
-                        print(f"✅ NEW: {case_number}")
                         
                     elif existing_record[1] != content_hash:
-                        # File has changed - update and mark for re-processing
                         records_to_update.append((content, content_hash, case_number))
                         updated_files += 1
-                        print(f"🔄 CHANGED: {case_number} - will re-process addresses")
                         
-                        # Remove existing addresses for this case so they get re-extracted
                         cur.execute("""
                             DELETE FROM address WHERE case_number = %s
                         """, (case_number,))
                         
                     else:
-                        # File unchanged
                         unchanged_files += 1
                         
             except Exception as e:
-                print(f"❌ Error processing {file_name}: {e}")
+                print(f"Error processing {file_name}: {e}")
 
-        # Bulk insert new records
+        # bulk insert new records
         if records_to_insert:
             cur.executemany("""
                 INSERT INTO raw_cases (case_number, raw_html, content_hash, last_updated)
                 VALUES (%s, %s, %s, NOW())
             """, records_to_insert)
             
-        # Bulk update changed records
+        # bulk update changed records
         if records_to_update:
             cur.executemany("""
                 UPDATE raw_cases 
@@ -121,11 +115,11 @@ def batch_html_to_postgres():
         print(f"📊 Batch {i // BATCH_SIZE + 1} processed: {len(records_to_insert)} new, {len(records_to_update)} updated")
 
     # Final summary
-    print(f"\n📈 HTML PROCESSING COMPLETE:")
-    print(f"  📄 Total files processed: {total_files}")
-    print(f"  ✅ New files: {new_files}")
-    print(f"  🔄 Changed files (will re-process): {updated_files}")
-    print(f"  ⏹️ Unchanged files: {unchanged_files}")
+    print(f"\n  HTML PROCESSING COMPLETE:")
+    print(f"    Total files processed: {total_files}")
+    print(f"    New files: {new_files}")
+    print(f"    Changed files (will re-process): {updated_files}")
+    print(f"    Unchanged files: {unchanged_files}")
 
     cur.close()
     conn.close()
