@@ -223,7 +223,7 @@ def derive_case_id(input_path, text_path):
 
 # keep header and footer pages based on markers
 def select_important_pages(text):
-    # Keep header (first 2) and footer (last 2) pages using OCR markers.
+    # keep header (first 2) and footer (last 2) pages using ocr markers
     pages = re.split(r"<<<\s*OCR_PAGE_\d+\s*>>>", text)
     pages = [page.strip() for page in pages if page.strip()]
     if not pages:
@@ -232,7 +232,18 @@ def select_important_pages(text):
         selected_pages = pages[:2] + pages[-2:]
     else:
         selected_pages = pages
-    return "\n".join(selected_pages)
+
+    def header_score(page_text):
+        keywords = ["case number", "plaintiff", "defendant", "court", "landlord"]
+        return sum(1 for keyword in keywords if keyword in page_text.lower())
+
+    header_page = max(selected_pages, key=header_score)
+    ordered_pages = [header_page]
+    for page in selected_pages:
+        if page != header_page:
+            ordered_pages.append(page)
+
+    return "\n".join(ordered_pages)
 
 
 # normalize label casing and whitespace
@@ -306,6 +317,72 @@ def extract_attorneys_from_text(text):
                         attorneys.append(candidate)
                     break
     return unique_list(attorneys)
+
+
+# apply final cleanup rules for parties and roles
+def apply_party_cleanup_rules(data):
+    parties = data.get("parties", [])
+    attorneys = data.get("attorneys", [])
+
+    attorney_names = {
+        entry.get("attorney_name", "").strip().lower()
+        for entry in attorneys
+        if entry.get("attorney_name")
+    }
+
+    # rule 1: remove attorneys from parties
+    parties = [
+        party
+        for party in parties
+        if party.get("party_name", "").strip().lower() not in attorney_names
+    ]
+
+    # rule 2: if a name is both plaintiff and defendant, keep defendant only
+    role_map = {}
+    for party in parties:
+        name_key = party.get("party_name", "").strip().lower()
+        if not name_key:
+            continue
+        role_map.setdefault(name_key, set()).add(party.get("party_type"))
+
+    cleaned_parties = []
+    for party in parties:
+        name_key = party.get("party_name", "").strip().lower()
+        roles = role_map.get(name_key, set())
+        if "Plaintiff" in roles and "Defendant" in roles:
+            if party.get("party_type") != "Defendant":
+                continue
+        cleaned_parties.append(party)
+
+    parties = cleaned_parties
+
+    # rule 3: prefer company plaintiff over person plaintiff
+    company_keywords = ("llc", "inc", "corp", "co", "company", "ltd")
+    plaintiff_parties = [p for p in parties if p.get("party_type") == "Plaintiff"]
+    company_plaintiffs = [
+        p
+        for p in plaintiff_parties
+        if any(keyword in p.get("party_name", "").lower() for keyword in company_keywords)
+    ]
+    person_plaintiffs = [
+        p
+        for p in plaintiff_parties
+        if p.get("party_name")
+        and " " in p.get("party_name")
+        and not any(keyword in p.get("party_name", "").lower() for keyword in company_keywords)
+    ]
+
+    if company_plaintiffs and person_plaintiffs:
+        company_names = {p.get("party_name") for p in company_plaintiffs}
+        parties = [
+            p
+            for p in parties
+            if p.get("party_type") != "Plaintiff" or p.get("party_name") in company_names
+        ]
+        data["first_party_name"] = company_plaintiffs[0].get("party_name")
+        data["first_party_type"] = "Plaintiff"
+
+    data["parties"] = parties
 
 
 # run gliner extraction and write the output json
@@ -386,6 +463,8 @@ def run_gliner_fill(input_path, output_path, model_name, threshold, overwrite, t
         "threshold": threshold,
         "generated_at": datetime.utcnow().isoformat() + "Z",
     }
+
+    apply_party_cleanup_rules(data)
 
     save_json(output_path, data)
 
