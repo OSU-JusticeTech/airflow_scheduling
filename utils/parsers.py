@@ -3,6 +3,42 @@ from bs4 import BeautifulSoup
 
 from utils.data_insertion import LOG
 
+
+def _parse_city_state_zip(raw: str):
+    """Robustly parse a combined "City / State / Zip" string.
+
+    Returns (city, state_zip) where state_zip may be None.
+    Handles formats like:
+      - "City, ST 12345"
+      - "City ST 12345"
+      - "City, ST"
+      - "City"
+    """
+    if not raw:
+        return (None, None)
+
+    s = raw.strip()
+
+    # If there's a comma, assume first part is city
+    if "," in s:
+        parts = [p.strip() for p in re.split(r",\s*", s) if p.strip()]
+        city = parts[0] if parts else None
+        state_zip = ", ".join(parts[1:]) if len(parts) > 1 else None
+        return (city, state_zip)
+
+    # Try to detect a trailing state + zip (e.g. "City ST 12345")
+    m = re.search(r"(?P<city>.+?)\s+(?P<state_zip>[A-Z]{2}\s*\d{5}(?:-\d{4})?)$", s)
+    if m:
+        return (m.group("city").strip(), m.group("state_zip").strip())
+
+    # Try to detect trailing state only (e.g. "City ST")
+    m2 = re.search(r"(?P<city>.+?)\s+(?P<state>[A-Z]{2})$", s)
+    if m2:
+        return (m2.group("city").strip(), m2.group("state").strip())
+
+    # Fallback: treat entire string as city
+    return (s, None)
+
 """
 Extract the parties table block.
 """
@@ -20,6 +56,34 @@ def extract_parties_from_text(text):
             "city": m.group("city").strip(),
             "state_zip": m.group("state_zip").strip()
         })
+
+    # If city was not captured reliably, try to infer it from the address field
+    for p in parties:
+        city = p.get("city")
+        if not city or len(city) < 2:
+            addr = p.get("address")
+            parsed_city, parsed_state_zip = _parse_city_state_zip(addr)
+            if parsed_city:
+                p["city"] = parsed_city
+            if parsed_state_zip and (not p.get("state_zip") or len(p.get("state_zip")) < 2):
+                p["state_zip"] = parsed_state_zip
+
+    # If no parties found with the strict pattern, try a looser pattern where City may be embedded in Address
+    if not parties:
+        alt_pattern = re.compile(
+            r"\d+\s+Name\s+(?P<name>.+?)\s+Type\s+(?P<type>\w+)\s+Address\s+(?P<address>.+?)\s+State/Zip\s+(?P<state_zip>.+?)(?:\s|$)",
+            re.I
+        )
+        for m in alt_pattern.finditer(text):
+            address = m.group("address").strip()
+            parsed_city, parsed_state_zip = _parse_city_state_zip(address)
+            parties.append({
+                "type": m.group("type").title(),
+                "name": m.group("name").strip(),
+                "address": address,
+                "city": parsed_city,
+                "state_zip": m.group("state_zip").strip() or parsed_state_zip
+            })
     return parties
 
 """
@@ -32,9 +96,8 @@ def extract_attorneys_from_text(text):
         re.I
     )
     for m in atty_pattern.finditer(text):
-        city_state_zip = m.group("city_state_zip").split(',')
-        city = city_state_zip[0].strip()
-        state_zip = city_state_zip[1].strip() if len(city_state_zip) > 1 else None
+        raw_city_state = m.group("city_state_zip").strip()
+        city, state_zip = _parse_city_state_zip(raw_city_state)
         attorneys.append({
             "party_type": m.group("party_type").title(),
             "attorney_name": m.group("name").strip(),
