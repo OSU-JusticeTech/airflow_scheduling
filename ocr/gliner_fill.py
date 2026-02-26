@@ -6,6 +6,11 @@ from datetime import datetime
 
 from gliner import GLiNER
 
+try:
+    from bs4 import BeautifulSoup
+except ImportError:
+    BeautifulSoup = None
+
 DEFAULT_MODEL = "urchade/gliner_small"
 DEFAULT_THRESHOLD = 0.35
 
@@ -18,40 +23,200 @@ LABELS = [
     "attorney name",
     "judge name",
     "disposition",
+    "address",
 ]
 
 
-# load json data from disk
 def load_json(path):
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
-# save json data to disk
 def save_json(path, data):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
 
-# extract a cvg-style case number from text
 def extract_case_number(text):
     match = re.search(r"\bCVG[- ]?\d{2}[- ]?\d{5,6}\b", text, re.IGNORECASE)
     return match.group(0).strip() if match else None
 
 
-# extract numeric dates from text
 def extract_dates(text):
     return re.findall(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{4}\b", text)
 
 
-# extract month-name dates from text
 def extract_month_dates(text):
-    # match dates like "JAN 17 2020" or "January 17, 2020"
     pattern = r"\b(?:Jan|January|Feb|February|Mar|March|Apr|April|May|Jun|June|Jul|July|Aug|August|Sep|Sept|September|Oct|October|Nov|November|Dec|December)\b\s+\d{1,2}(?:,)?\s+\d{4}"
     return re.findall(pattern, text, re.IGNORECASE)
 
 
-# dedupe and normalize gliner entities
+def extract_unpaid_amount(text):
+    # extract unpaid balance or amount owed from ocr text
+    patterns = [
+        r'balance\s+due\s*:?\s*\$?\s*([\d,]+\.?\d{0,2})',
+        r'unpaid\s+(?:balance|amount)\s*:?\s*\$?\s*([\d,]+\.?\d{0,2})',
+        r'amount\s+owed\s*:?\s*\$?\s*([\d,]+\.?\d{0,2})',
+        r'total\s+due\s*:?\s*\$?\s*([\d,]+\.?\d{0,2})',
+        r'balance\s+notification\s*:?\s*\$?\s*([\d,]+\.?\d{0,2})',
+        r'outstanding\s+(?:balance|amount)\s*:?\s*\$?\s*([\d,]+\.?\d{0,2})',
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            amount_str = match.group(1).replace(',', '')
+            try:
+                amount = float(amount_str)
+                return f"${amount:,.2f}"
+            except ValueError:
+                continue
+    
+    return None
+
+
+# extract addresses from html file using patterns and gliner
+def extract_addresses_from_html(case_directory, model):
+    addresses = []
+    if not case_directory or not os.path.exists(case_directory):
+        return addresses
+    
+    printable_html_path = os.path.join(case_directory, "printable.html")
+    
+    if os.path.exists(printable_html_path):
+        try:
+            if BeautifulSoup is None:
+                return addresses
+            
+            with open(printable_html_path, 'r', encoding='utf-8') as f:
+                html_content = f.read()
+            
+            soup = BeautifulSoup(html_content, 'html.parser')
+            html_text = soup.get_text()
+            
+            address_patterns = [
+                r'premises at ([^.\n]+)',
+                r'serve defendant[^\n]*at ([^.\n]+)',
+                r'at (\d+\s+[A-Z][A-Z\s]+(?:ST|STREET|AVE|AVENUE|DR|DRIVE|RD|ROAD|BLVD|BOULEVARD)(?:\s+(?:APT|APARTMENT|UNIT|STE|SUITE|#)\s*\w+)?\s*,?\s*[A-Z]+\s*,?\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?)',
+            ]
+            
+            for pattern in address_patterns:
+                matches = re.findall(pattern, html_text, re.IGNORECASE)
+                for match in matches:
+                    clean_match = match.strip()
+                    if re.search(r'\d+.*(?:DR|DRIVE|ST|STREET|AVE|AVENUE)', clean_match, re.IGNORECASE):
+                        if is_reasonable_address(clean_match):
+                            addresses.append(parse_address_string(clean_match))
+                            break
+                if addresses:
+                    break
+            
+            if len(addresses) < 2:
+                entities = model.predict_entities(html_text, ["address", "location"], threshold=0.3)
+                
+                for entity in entities:
+                    if entity.get("label") in ["address", "location"] and entity.get("text"):
+                        address_text = entity["text"].strip()
+                        if not re.search(r'\b(court|courtroom|clerk|municipal)\b', address_text, re.IGNORECASE):
+                            if is_reasonable_address(address_text):
+                                addresses.append(parse_address_string(address_text))
+        
+        except Exception:
+            pass
+    
+    return addresses
+
+
+def extract_addresses_after_at(text):
+    addresses = []
+    lines = [line.strip() for line in text.splitlines()]
+    
+    for line in lines:
+        # improved pattern that stops at logical address boundaries
+        at_matches = re.finditer(r'\b(?:at|located at|residing at|address at)\s+(\d+\s+[A-Z][A-Z\s]+(?:ST|STREET|AVE|AVENUE|DR|DRIVE|RD|ROAD|BLVD|BOULEVARD)(?:\s+(?:APT|APARTMENT|UNIT|STE|SUITE|#)\s*\w+)?\s*,?\s*[A-Z]+\s*,?\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?)', line, re.IGNORECASE)
+        
+        for match in at_matches:
+            candidate = match.group(1).strip()
+            if candidate and is_reasonable_address(candidate):
+                parsed_addr = parse_address_string(candidate)
+                addresses.append(parsed_addr)
+    
+    return addresses
+
+
+# comprehensive address extraction with priority assignment
+def extract_addresses_comprehensive(text, party_names, input_path=None, text_path=None, model=None):
+    party_addresses = {}
+    all_found_addresses = []
+    
+    case_directory = None
+    if input_path and os.path.exists(input_path):
+        if os.path.isdir(input_path):
+            case_directory = input_path
+        else:
+            case_directory = os.path.dirname(input_path)
+    elif text_path and os.path.exists(text_path):
+        case_directory = os.path.dirname(text_path)
+    
+    if case_directory and model:
+        html_addresses = extract_addresses_from_html(case_directory, model)
+        all_found_addresses.extend(html_addresses)
+    
+    if len(all_found_addresses) < 2:
+        at_addresses = extract_addresses_after_at(text)
+        all_found_addresses.extend(at_addresses)
+    
+    if not all_found_addresses:
+        party_addresses = extract_party_addresses(text, party_names)
+        return party_addresses
+    
+    defendants = [name for name in party_names if any(keyword in name.lower() for keyword in ['lewis', 'defendant'])]
+    plaintiffs = [name for name in party_names if name not in defendants]
+    
+    if defendants and all_found_addresses:
+        party_addresses[defendants[0]] = all_found_addresses[0]
+    
+    remaining_parties = plaintiffs + defendants[1:]
+    for i, party_name in enumerate(remaining_parties):
+        if i + 1 < len(all_found_addresses):
+            party_addresses[party_name] = all_found_addresses[i + 1]
+        elif all_found_addresses and party_name not in party_addresses:
+            party_addresses[party_name] = all_found_addresses[0]
+    
+    return party_addresses
+
+
+def extract_party_addresses(text, party_names):
+    party_addresses = {}
+    lines = [line.strip() for line in text.splitlines()]
+    
+    for party_name in party_names:
+        for i, line in enumerate(lines):
+            if party_name.lower() in line.lower():
+                for j in range(i + 1, min(i + 6, len(lines))):
+                    candidate = lines[j].strip()
+                    if candidate and is_reasonable_address(candidate):
+                        party_addresses[party_name] = parse_address_string(candidate)
+                        break
+                if party_name in party_addresses:
+                    break
+    
+    return party_addresses
+
+
+def is_reasonable_address(value):
+    if not value:
+        return False
+    value = value.strip()
+    if len(value) < 5 or len(value) > 150:
+        return False
+    if not re.search(r"\d", value):
+        return False
+    if re.search(r"\b(case|court|hearing|plaintiff|defendant|attorney|judge)\b", value, re.IGNORECASE):
+        return False
+    return True
+
+
 def normalize_entities(entities):
     cleaned = []
     seen = set()
@@ -67,7 +232,6 @@ def normalize_entities(entities):
     return cleaned
 
 
-# group entities by label and sort by score
 def group_by_label(entities):
     grouped = {}
     for ent in entities:
@@ -77,13 +241,11 @@ def group_by_label(entities):
     return grouped
 
 
-# pick the highest scored entity for a label
 def pick_first(grouped, label):
     items = grouped.get(label, [])
     return items[0]["text"] if items else None
 
 
-# return a case-insensitive unique list
 def unique_list(values):
     result = []
     seen = set()
@@ -96,51 +258,162 @@ def unique_list(values):
     return result
 
 
-# update a field only when empty or overwriting
 def update_if_empty(target, key, value, overwrite=False):
     if overwrite or target.get(key) in (None, "", []):
         target[key] = value
 
 
-# build party records from names
-def build_parties(plaintiffs, defendants):
+def build_parties(plaintiffs, defendants, party_addresses):
     parties = []
     for name in plaintiffs:
-        parties.append({"party_name": name, "party_type": "Plaintiff", "address_id": None})
+        address = party_addresses.get(name, None)
+        parties.append({
+            "party_name": name,
+            "party_type": "Plaintiff",
+            "address_id": None,
+            "address": address
+        })
     for name in defendants:
-        parties.append({"party_name": name, "party_type": "Defendant", "address_id": None})
+        address = party_addresses.get(name, None)
+        parties.append({
+            "party_name": name,
+            "party_type": "Defendant",
+            "address_id": None,
+            "address": address
+        })
     return parties
 
 
-# build attorney records from names
-def build_attorneys(attorneys):
-    return [
-        {
+def build_attorneys(attorneys, attorney_addresses=None):
+    results = []
+    for name in attorneys:
+        results.append({
             "attorney_name": name,
             "attorney_type": "Attorney",
-            "party_id": None,
-            "address_id": None,
-        }
-        for name in attorneys
-    ]
+            "party_id": None
+        })
+    return results
 
 
-# build disposition records from statuses
-def build_dispositions(dispositions, filed_date):
+# parse address string into components
+def parse_address_string(address_str):
+    address_str = address_str.strip()
+    full_address = address_str
+    
+    # basic address structure
+    result = {
+        "address_type": "Physical",
+        "address_line1": address_str,
+        "address_line2": full_address,
+        "city": None,
+        "state": None,
+        "country": "USA",
+        "postal_code": None,
+    }
+    
+    remaining_addr = address_str
+    
+    zip_match = re.search(r'\b(\d{5})(?:-\d{4})?\s*$', remaining_addr)
+    if zip_match:
+        result["postal_code"] = zip_match.group(1)
+        remaining_addr = remaining_addr[:zip_match.start()].strip()
+    
+    state_match = re.search(r'\b([A-Z]{2})\s*$', remaining_addr)
+    if state_match:
+        result["state"] = state_match.group(1)
+        remaining_addr = remaining_addr[:state_match.start()].strip()
+    
+    remaining_addr = remaining_addr.rstrip(',').strip()
+    
+    if ',' in remaining_addr:
+        parts = remaining_addr.rsplit(',', 1)
+        if len(parts) == 2:
+            street_part = parts[0].strip()
+            city_part = parts[1].strip()
+            if city_part:
+                result["city"] = city_part
+                result["address_line1"] = street_part
+            else:
+                result["address_line1"] = remaining_addr
+        else:
+            result["address_line1"] = remaining_addr
+    else:
+        words = remaining_addr.split()
+        if len(words) >= 2:
+            result["city"] = words[-1]
+            result["address_line1"] = ' '.join(words[:-1])
+        else:
+            result["address_line1"] = remaining_addr
+    
+    return result
+
+
+# extract judge name from html file
+def extract_judge_from_html(case_directory):
+    judge_name = None
+    if not case_directory or not os.path.exists(case_directory):
+        return judge_name
+    
+    printable_html_path = os.path.join(case_directory, "printable.html")
+    
+    if os.path.exists(printable_html_path):
+        try:
+            if BeautifulSoup is None:
+                return judge_name
+            
+            with open(printable_html_path, 'r', encoding='utf-8') as f:
+                html_content = f.read()
+            
+            soup = BeautifulSoup(html_content, 'html.parser')
+            html_text = soup.get_text()
+            
+            # look for judge patterns
+            judge_patterns = [
+                r'judge[:\s]+([A-Z][a-zA-Z\s\.]+)',
+                r'the honorable\s+([A-Z][a-zA-Z\s\.]+)',
+                r'hon\.?\s+([A-Z][a-zA-Z\s\.]+)',
+            ]
+            
+            for pattern in judge_patterns:
+                matches = re.findall(pattern, html_text, re.IGNORECASE)
+                for match in matches:
+                    clean_match = match.strip()
+                    # remove common unwanted suffixes
+                    clean_match = re.sub(r'\s*(view scanned document|scanned|document).*$', '', clean_match, flags=re.IGNORECASE)
+                    clean_match = re.sub(r'\n.*$', '', clean_match)  # remove everything after newline
+                    # take only the first word(s) that look like a name
+                    name_parts = clean_match.split()
+                    if name_parts:
+                        clean_match = ' '.join(name_parts[:2]).strip()  # take up to 2 words
+                    
+                    if len(clean_match) > 2 and len(clean_match) < 30:
+                        # basic validation for judge names
+                        if not re.search(r'\b(court|clerk|case|defendant|plaintiff|view|document|scanned)\b', clean_match, re.IGNORECASE):
+                            judge_name = clean_match
+                            break
+                if judge_name:
+                    break
+        
+        except Exception:
+            pass
+    
+    return judge_name
+
+
+def build_dispositions(dispositions, filed_date, judge_name=None):
     results = []
     for status in dispositions:
         results.append(
             {
                 "disposition_status": status,
                 "disposition_status_date": filed_date,
-                "judge": None,
+                "judge": judge_name,
                 "disposition_date": filed_date,
             }
         )
     return results
 
 
-# infer case status from dispositions or keywords
 def infer_case_status(text, dispositions):
     if dispositions:
         return dispositions[0]
@@ -150,7 +423,6 @@ def infer_case_status(text, dispositions):
     return None
 
 
-# read raw text content from a file
 def read_text_file(path):
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -159,9 +431,7 @@ def read_text_file(path):
         return ""
 
 
-# choose the best source text for extraction
 def select_source_text(input_path, data, text_path=None):
-    # prefer explicit text file, then raw_text/raw_html fallback
     if text_path:
         text = read_text_file(text_path)
         if text.strip():
@@ -178,7 +448,6 @@ def select_source_text(input_path, data, text_path=None):
     return text
 
 
-# create a base record for gliner output
 def init_base_record(case_id, raw_text):
     return {
         "case_number": case_id,
@@ -202,7 +471,6 @@ def init_base_record(case_id, raw_text):
     }
 
 
-# derive a case id from input or raw text filename
 def derive_case_id(input_path, text_path):
     if text_path:
         return os.path.splitext(os.path.basename(text_path))[0]
@@ -221,7 +489,7 @@ def derive_case_id(input_path, text_path):
     return "unknown"
 
 
-# keep header and footer pages based on markers
+# filter pages by ocr markers
 def select_important_pages(text):
     # keep header (first 2) and footer (last 2) pages using ocr markers
     pages = re.split(r"<<<\s*OCR_PAGE_\d+\s*>>>", text)
@@ -246,12 +514,12 @@ def select_important_pages(text):
     return "\n".join(ordered_pages)
 
 
-# normalize label casing and whitespace
+# normalize label text
 def normalize_label(label):
     return label.strip().lower()
 
 
-# filter out noisy or invalid name candidates
+# filter invalid name candidates
 def is_reasonable_name(value):
     if not value:
         return False
@@ -263,9 +531,9 @@ def is_reasonable_name(value):
     return True
 
 
-# extract a party name from nearby label lines
+# extract party name from label context
 def extract_party_from_lines(lines, label):
-    # find a label line and take the previous non-empty line as the name
+    # find label line and take previous line as name
     label_regex = re.compile(label, re.IGNORECASE)
     for i, line in enumerate(lines):
         if label_regex.search(line):
@@ -278,7 +546,7 @@ def extract_party_from_lines(lines, label):
     return None
 
 
-# extract plaintiff and defendant names from text
+# extract party names from text
 def extract_parties_from_text(text):
     plaintiffs = []
     defendants = []
@@ -304,7 +572,7 @@ def extract_parties_from_text(text):
     return unique_list(plaintiffs), unique_list(defendants)
 
 
-# extract attorney names from text context
+# extract attorney names
 def extract_attorneys_from_text(text):
     attorneys = []
     lines = [line.strip() for line in text.splitlines()]
@@ -319,7 +587,7 @@ def extract_attorneys_from_text(text):
     return unique_list(attorneys)
 
 
-# apply final cleanup rules for parties and roles
+# cleanup party roles
 def apply_party_cleanup_rules(data):
     parties = data.get("parties", [])
     attorneys = data.get("attorneys", [])
@@ -330,14 +598,30 @@ def apply_party_cleanup_rules(data):
         if entry.get("attorney_name")
     }
 
-    # rule 1: remove attorneys from parties
+    # remove attorneys from parties
     parties = [
         party
         for party in parties
         if party.get("party_name", "").strip().lower() not in attorney_names
     ]
 
-    # rule 2: if a name is both plaintiff and defendant, keep defendant only
+    # dedupe parties by case-insensitive name and role
+    deduped_parties = []
+    seen_party_keys = set()
+    for party in parties:
+        name_key = party.get("party_name", "").strip().lower()
+        role_key = party.get("party_type", "").strip()
+        if not name_key:
+            continue
+        party_key = (name_key, role_key)
+        if party_key in seen_party_keys:
+            continue
+        seen_party_keys.add(party_key)
+        deduped_parties.append(party)
+
+    parties = deduped_parties
+
+    # resolve dual plaintiff/defendant roles
     role_map = {}
     for party in parties:
         name_key = party.get("party_name", "").strip().lower()
@@ -356,7 +640,7 @@ def apply_party_cleanup_rules(data):
 
     parties = cleaned_parties
 
-    # rule 3: prefer company plaintiff over person plaintiff
+    # prefer company plaintiffs
     company_keywords = ("llc", "inc", "corp", "co", "company", "ltd")
     plaintiff_parties = [p for p in parties if p.get("party_type") == "Plaintiff"]
     company_plaintiffs = [
@@ -385,10 +669,10 @@ def apply_party_cleanup_rules(data):
     data["parties"] = parties
 
 
-# run gliner extraction and write the output json
 def run_gliner_fill(input_path, output_path, model_name, threshold, overwrite, text_path=None):
     data = None
-    if input_path and os.path.exists(input_path):
+    
+    if input_path and os.path.exists(input_path) and not os.path.isdir(input_path):
         data = load_json(input_path)
     else:
         case_id = derive_case_id(input_path, text_path)
@@ -427,6 +711,24 @@ def run_gliner_fill(input_path, output_path, model_name, threshold, overwrite, t
     defendants = unique_list(defendants + extracted_defendants)
     attorneys = unique_list(attorneys + extracted_attorneys)
     dispositions = unique_list(dispositions)
+    
+    all_parties = plaintiffs + defendants
+    party_addresses = extract_addresses_comprehensive(text_for_model, all_parties, input_path, text_path, model)
+    
+    # extract judge from html
+    case_directory = None
+    if input_path and os.path.exists(input_path):
+        if os.path.isdir(input_path):
+            case_directory = input_path
+        else:
+            case_directory = os.path.dirname(input_path)
+    elif text_path and os.path.exists(text_path):
+        case_directory = os.path.dirname(text_path)
+    
+    html_judge = extract_judge_from_html(case_directory)
+    
+    # extract unpaid amount from ocr text
+    unpaid_amount = extract_unpaid_amount(text_for_model)
 
     case_title = None
     if not case_title and plaintiffs and defendants:
@@ -438,7 +740,7 @@ def run_gliner_fill(input_path, output_path, model_name, threshold, overwrite, t
     first_party_type = "Plaintiff" if plaintiffs else ("Defendant" if defendants else None)
     first_attorney_name = attorneys[0] if attorneys else None
     first_attorney_type = "Attorney" if first_attorney_name else None
-    first_event_judge = pick_first(grouped, "judge name")
+    first_event_judge = html_judge or pick_first(grouped, "judge name")
 
     update_if_empty(data, "case_number", case_number, overwrite)
     update_if_empty(data, "case_title", case_title, overwrite)
@@ -450,13 +752,14 @@ def run_gliner_fill(input_path, output_path, model_name, threshold, overwrite, t
     update_if_empty(data, "first_attorney_name", first_attorney_name, overwrite)
     update_if_empty(data, "first_attorney_type", first_attorney_type, overwrite)
     update_if_empty(data, "first_event_judge", first_event_judge, overwrite)
+    update_if_empty(data, "total_unpaid_amount_defendent", unpaid_amount, overwrite)
 
     if overwrite or not data.get("parties"):
-        data["parties"] = build_parties(plaintiffs, defendants)
+        data["parties"] = build_parties(plaintiffs, defendants, party_addresses)
     if overwrite or not data.get("attorneys"):
         data["attorneys"] = build_attorneys(attorneys)
     if overwrite or not data.get("dispositions"):
-        data["dispositions"] = build_dispositions(dispositions, filed_date)
+        data["dispositions"] = build_dispositions(dispositions, filed_date, html_judge)
 
     data["gliner_meta"] = {
         "model": model_name,
@@ -469,7 +772,7 @@ def run_gliner_fill(input_path, output_path, model_name, threshold, overwrite, t
     save_json(output_path, data)
 
 
-# parse cli args and run the fill pipeline
+# main cli handler
 def main():
     parser = argparse.ArgumentParser(description="Fill case JSON using GLiNER")
     parser.add_argument(

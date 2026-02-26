@@ -1,8 +1,4 @@
-#!/usr/bin/env python3
-"""
-batch etl for processing multiple case folders
-runs ocr extraction (test_run logic) + gliner fill per folder
-"""
+
 import os
 import sys
 import json
@@ -15,7 +11,7 @@ OCR_DIR = BASE_DIR / "ocr"
 CASE_DIRS_ROOT = BASE_DIR.parent / "k3s.dranspo.se:8000" / "data"
 RAW_TEXT_DIR = OCR_DIR / "raw_text"
 JSON_OUTPUT_DIR = OCR_DIR / "texts"
-BATCH_SIZE = 5
+BATCH_SIZE = 3
 
 # ensure output dirs exist
 RAW_TEXT_DIR.mkdir(parents=True, exist_ok=True)
@@ -32,6 +28,16 @@ def discover_case_folders(root_dir, limit=None):
         d for d in root_dir.iterdir()
         if d.is_dir() and not d.name.startswith(".")
     ]
+    folders = sorted(folders, key=lambda p: p.name)
+
+    # skip folders that already have output json
+    unprocessed = []
+    for folder in folders:
+        output_json = JSON_OUTPUT_DIR / f"{folder.name}.json"
+        if output_json.exists():
+            continue
+        unprocessed.append(folder)
+    folders = unprocessed
     
     if limit:
         folders = folders[:limit]
@@ -90,9 +96,9 @@ def run_ocr_for_folder(case_folder):
         try:
             print(f"    running ocr...")
             pages = convert_from_path(str(pdf_path), dpi=300)
-            # keep header (first 3) and footer (last 2) pages to reduce noise
-            if len(pages) > 5:
-                pages = pages[:3] + pages[-2:]
+            # keep header (first 3) and footer (last 3) pages to reduce noise
+            if len(pages) > 6:
+                pages = pages[:3] + pages[-3:]
             text_output = []
             for i, page in enumerate(pages):
                 print(f"      page {i+1}/{len(pages)}...")
@@ -137,6 +143,38 @@ def run_ocr_for_folder(case_folder):
     print(f"  saved raw text: {txt_path}")
     
     return case_id
+
+
+def run_address_extraction_for_case(case_id):
+    """run address extraction from printable.html for a single case"""
+    print(f"\n  running address extraction for {case_id}...")
+    
+    # case_id is already the full folder name like "CVG-20-00287"
+    case_folder = CASE_DIRS_ROOT / case_id
+    if not case_folder.exists():
+        print(f"    error: case folder not found: {case_folder}")
+        return False
+    
+    cmd = [
+        sys.executable,
+        str(OCR_DIR / "html_printable_overwrite.py"),
+        str(case_folder)
+    ]
+    
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode == 0:
+            print(f"  address extraction complete for {case_id}")
+            return True
+        else:
+            print(f"    address extraction error: {result.stderr}")
+            return False
+    except subprocess.TimeoutExpired:
+        print(f"    address extraction timeout")
+        return False
+    except Exception as e:
+        print(f"    address extraction exception: {e}")
+        return False
 
 
 def run_gliner_for_case(case_id):
@@ -193,6 +231,8 @@ def main():
             continue
         
         if run_gliner_for_case(case_id):
+            # run address extraction after successful gliner processing
+            run_address_extraction_for_case(case_id)
             success_count += 1
         else:
             fail_count += 1

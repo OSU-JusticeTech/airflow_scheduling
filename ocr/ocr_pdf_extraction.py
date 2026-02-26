@@ -134,9 +134,9 @@ def ocr_pdf_fallback(pdf_path):
     try:
         print(f"    (trying OCR with rotation/mirroring...)")
         pages = convert_from_path(pdf_path, dpi=300)
-        # keep header (first 3) and footer (last 2) pages to reduce noise
-        if len(pages) > 5:
-            pages = pages[:3] + pages[-2:]
+        # keep header (first 3) and footer (last 3) pages to reduce noise
+        if len(pages) > 6:
+            pages = pages[:3] + pages[-3:]
         text_output = []
         for i, page in enumerate(pages):
             print(f"      ocr page {i+1}/{len(pages)}...")
