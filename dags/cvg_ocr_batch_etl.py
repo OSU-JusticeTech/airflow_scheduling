@@ -1,250 +1,268 @@
 
 import os
-import sys
-import json
+import re
 import subprocess
+import sys
+from datetime import datetime
 from pathlib import Path
 
-# configuration
-BASE_DIR = Path(__file__).parent.parent
-OCR_DIR = BASE_DIR / "ocr"
-CASE_DIRS_ROOT = BASE_DIR.parent / "k3s.dranspo.se:8000" / "data"
-RAW_TEXT_DIR = OCR_DIR / "raw_text"
-JSON_OUTPUT_DIR = OCR_DIR / "texts"
-BATCH_SIZE = 3
+from airflow import DAG
+from airflow.decorators import task
+from dotenv import load_dotenv
 
-# ensure output dirs exist
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+# load local env vars for dag runtime config
+load_dotenv(PROJECT_ROOT / ".env")
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y"}
+
+
+def _int_env(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+OCR_DIR = Path(os.getenv("CVG_OCR_DIR", str(PROJECT_ROOT / "ocr"))).expanduser()
+CASE_DIRS_ROOT = Path(
+    os.getenv("CVG_CASE_DIRS_ROOT", str(PROJECT_ROOT.parent / "k3s.dranspo.se:8000" / "data"))
+).expanduser()
+RAW_TEXT_DIR = Path(os.getenv("CVG_RAW_TEXT_DIR", str(OCR_DIR / "raw_text"))).expanduser()
+JSON_OUTPUT_DIR = Path(os.getenv("CVG_JSON_OUTPUT_DIR", str(OCR_DIR / "texts"))).expanduser()
+BATCH_SIZE = _int_env("CVG_BATCH_SIZE", 3)
+GLINER_TIMEOUT_SECONDS = _int_env("CVG_GLINER_TIMEOUT_SECONDS", 180)
+ADDRESS_TIMEOUT_SECONDS = _int_env("CVG_ADDRESS_TIMEOUT_SECONDS", 60)
+DEFAULT_SCHEDULE = os.getenv("CVG_OCR_SCHEDULE", "@daily")
+DEFAULT_CATCHUP = _bool_env("CVG_OCR_CATCHUP", False)
+DEFAULT_START_DATE = datetime.fromisoformat(os.getenv("CVG_OCR_START_DATE", "2026-03-11"))
+
 RAW_TEXT_DIR.mkdir(parents=True, exist_ok=True)
 JSON_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def discover_case_folders(root_dir, limit=None):
-    """find case folders in the root directory"""
+def discover_case_ids(root_dir: Path, limit: int | None = None) -> list[str]:
     if not root_dir.exists():
         print(f"error: root directory not found: {root_dir}")
         return []
-    
-    folders = [
-        d for d in root_dir.iterdir()
-        if d.is_dir() and not d.name.startswith(".")
-    ]
-    folders = sorted(folders, key=lambda p: p.name)
 
-    # skip folders that already have output json
-    unprocessed = []
+    folders = sorted(
+        [d for d in root_dir.iterdir() if d.is_dir() and not d.name.startswith(".")],
+        key=lambda p: p.name,
+    )
+
+    unprocessed_ids = []
     for folder in folders:
+        # skip cases that already produced final json output
         output_json = JSON_OUTPUT_DIR / f"{folder.name}.json"
-        if output_json.exists():
-            continue
-        unprocessed.append(folder)
-    folders = unprocessed
-    
+        if not output_json.exists():
+            unprocessed_ids.append(folder.name)
+
     if limit:
-        folders = folders[:limit]
-    
-    print(f"found {len(folders)} case folder(s)")
-    return folders
+        unprocessed_ids = unprocessed_ids[:limit]
+
+    print(f"found {len(unprocessed_ids)} case folder(s) to process")
+    return unprocessed_ids
 
 
-def run_ocr_for_folder(case_folder):
-    """run ocr extraction (inline test_run logic) for a single folder"""
+def _score_ocr_text(text: str) -> int:
+    return len(re.findall(r"[A-Za-z]{3,}", text))
+
+
+def _ocr_best_for_page(page, image_ops_module, pytesseract_module) -> str:
+    candidates = []
+    # try rotations + mirrored variants and keep the most readable text
+    for angle in (0, 90, 180, 270):
+        rotated = page.rotate(angle, expand=True) if angle else page
+        candidates.append(rotated)
+        candidates.append(image_ops_module.mirror(rotated))
+
+    best_text = ""
+    best_score = -1
+    for image in candidates:
+        text = pytesseract_module.image_to_string(image)
+        score = _score_ocr_text(text)
+        if score > best_score:
+            best_score = score
+            best_text = text
+    return best_text
+
+
+def _ocr_pdf(pdf_path: Path, convert_from_path_func, image_ops_module, pytesseract_module) -> str:
+    try:
+        print("    running ocr...")
+        pages = convert_from_path_func(str(pdf_path), dpi=300)
+        # sample beginning/end pages to reduce runtime and noise
+        if len(pages) > 6:
+            pages = pages[:3] + pages[-3:]
+
+        text_output = []
+        for i, page in enumerate(pages):
+            print(f"      page {i + 1}/{len(pages)}...")
+            text = _ocr_best_for_page(page, image_ops_module, pytesseract_module)
+            if text:
+                text_output.append(text)
+            text_output.append(f"\n<<< OCR_PAGE_{i + 1} >>>\n")
+        return "\n".join(text_output) if text_output else ""
+    except Exception as exc:
+        print(f"    ocr error: {exc}")
+        return ""
+
+
+def _extract_text_direct(pdf_path: Path, pdfplumber_module) -> str:
+    try:
+        text_output = []
+        with pdfplumber_module.open(str(pdf_path)) as pdf:
+            for page in pdf.pages:
+                text = page.extract_text()
+                if text:
+                    text_output.append(text)
+        return "\n".join(text_output) if text_output else ""
+    except Exception as exc:
+        print(f"    direct extraction error: {exc}")
+        return ""
+
+
+def run_ocr_for_case(case_id: str) -> str | None:
     import pdfplumber
     import pytesseract
     from pdf2image import convert_from_path
     from PIL import ImageOps
-    import re
-    
-    print(f"\n{'='*80}")
-    print(f"processing: {case_folder.name}")
-    print(f"{'='*80}")
-    
-    # find pdfs
+
+    case_folder = CASE_DIRS_ROOT / case_id
+    if not case_folder.exists():
+        print(f"error: case folder not found: {case_folder}")
+        return None
+
+    print(f"\n{'=' * 80}")
+    print(f"processing: {case_id}")
+    print(f"{'=' * 80}")
+
     pdf_files = list(case_folder.glob("*.pdf"))
     if not pdf_files:
-        print(f"  no pdfs found in {case_folder.name}")
+        print(f"  no pdfs found in {case_id}")
         return None
-    
-    # select largest
+
     largest_pdf = max(pdf_files, key=lambda p: p.stat().st_size)
     print(f"  selected: {largest_pdf.name} ({largest_pdf.stat().st_size} bytes)")
-    
-    # score ocr text by readable word count
-    def score_ocr_text(text):
-        words = re.findall(r"[A-Za-z]{3,}", text)
-        return len(words)
-    
-    # pick the best ocr result across rotations and mirroring
-    def ocr_best_for_page(page):
-        candidates = []
-        for angle in (0, 90, 180, 270):
-            rotated = page.rotate(angle, expand=True) if angle else page
-            candidates.append(rotated)
-            candidates.append(ImageOps.mirror(rotated))
-        
-        best_text = ""
-        best_score = -1
-        for image in candidates:
-            text = pytesseract.image_to_string(image)
-            score = score_ocr_text(text)
-            if score > best_score:
-                best_score = score
-                best_text = text
-        return best_text
-    
-    # run ocr on selected pages and add page markers
-    def ocr_pdf(pdf_path):
-        try:
-            print(f"    running ocr...")
-            pages = convert_from_path(str(pdf_path), dpi=300)
-            # keep header (first 3) and footer (last 3) pages to reduce noise
-            if len(pages) > 6:
-                pages = pages[:3] + pages[-3:]
-            text_output = []
-            for i, page in enumerate(pages):
-                print(f"      page {i+1}/{len(pages)}...")
-                text = ocr_best_for_page(page)
-                if text:
-                    text_output.append(text)
-                page_marker = f"\n<<< OCR_PAGE_{i+1} >>>\n"
-                text_output.append(page_marker)
-            return "\n".join(text_output) if text_output else ""
-        except Exception as e:
-            print(f"    ocr error: {e}")
-            return ""
-    
-    # try direct extraction fallback
-    def extract_text_direct(pdf_path):
-        try:
-            text_output = []
-            with pdfplumber.open(str(pdf_path)) as pdf:
-                for page in pdf.pages:
-                    text = page.extract_text()
-                    if text:
-                        text_output.append(text)
-            return "\n".join(text_output) if text_output else ""
-        except Exception as e:
-            print(f"    direct extraction error: {e}")
-            return ""
-    
-    # run ocr
-    text = ocr_pdf(largest_pdf)
+
+    text = _ocr_pdf(largest_pdf, convert_from_path, ImageOps, pytesseract)
     if not text:
-        print(f"    ocr failed, trying direct extraction...")
-        text = extract_text_direct(largest_pdf)
-    
+        # fallback if image ocr returns empty text
+        print("    ocr failed, trying direct extraction...")
+        text = _extract_text_direct(largest_pdf, pdfplumber)
+
     if not text:
-        print(f"  no text extracted")
+        print("  no text extracted")
         return None
-    
-    # save raw text
-    case_id = case_folder.name
+
     txt_path = RAW_TEXT_DIR / f"{case_id}.txt"
     txt_path.write_text(text, encoding="utf-8")
     print(f"  saved raw text: {txt_path}")
-    
     return case_id
 
 
-def run_address_extraction_for_case(case_id):
-    """run address extraction from printable.html for a single case"""
+def run_gliner_for_case(case_id: str | None) -> str | None:
+    if not case_id:
+        return None
+
+    print(f"\n  running gliner fill for {case_id}...")
+    txt_path = RAW_TEXT_DIR / f"{case_id}.txt"
+    if not txt_path.exists():
+        print(f"    error: raw text not found: {txt_path}")
+        return None
+
+    json_output = JSON_OUTPUT_DIR / f"{case_id}.json"
+    cmd = [
+        sys.executable,
+        str(OCR_DIR / "gliner_fill.py"),
+        "--text-path",
+        str(txt_path),
+        "--output",
+        str(json_output),
+        "--overwrite",
+    ]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=GLINER_TIMEOUT_SECONDS)
+        if result.returncode == 0:
+            print(f"  gliner complete: {json_output}")
+            return case_id
+
+        print(f"    gliner error: {result.stderr}")
+        return None
+    except subprocess.TimeoutExpired:
+        print("    gliner timeout")
+        return None
+    except Exception as exc:
+        print(f"    gliner exception: {exc}")
+        return None
+
+
+def run_address_extraction_for_case(case_id: str | None) -> bool:
+    if not case_id:
+        return False
+
     print(f"\n  running address extraction for {case_id}...")
-    
-    # case_id is already the full folder name like "CVG-20-00287"
     case_folder = CASE_DIRS_ROOT / case_id
     if not case_folder.exists():
         print(f"    error: case folder not found: {case_folder}")
         return False
-    
-    cmd = [
-        sys.executable,
-        str(OCR_DIR / "html_printable_overwrite.py"),
-        str(case_folder)
-    ]
-    
+
+    cmd = [sys.executable, str(OCR_DIR / "html_printable_overwrite.py"), str(case_folder)]
+
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=ADDRESS_TIMEOUT_SECONDS)
         if result.returncode == 0:
             print(f"  address extraction complete for {case_id}")
             return True
-        else:
-            print(f"    address extraction error: {result.stderr}")
-            return False
+
+        print(f"    address extraction error: {result.stderr}")
+        return False
     except subprocess.TimeoutExpired:
-        print(f"    address extraction timeout")
+        print("    address extraction timeout")
         return False
-    except Exception as e:
-        print(f"    address extraction exception: {e}")
-        return False
-
-
-def run_gliner_for_case(case_id):
-    """run gliner fill for a single case"""
-    print(f"\n  running gliner fill for {case_id}...")
-    
-    txt_path = RAW_TEXT_DIR / f"{case_id}.txt"
-    if not txt_path.exists():
-        print(f"    error: raw text not found: {txt_path}")
-        return False
-    
-    json_output = JSON_OUTPUT_DIR / f"{case_id}.json"
-    
-    cmd = [
-        sys.executable,
-        str(OCR_DIR / "gliner_fill.py"),
-        "--text-path", str(txt_path),
-        "--output", str(json_output),
-        "--overwrite"
-    ]
-    
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        if result.returncode == 0:
-            print(f"  gliner complete: {json_output}")
-            return True
-        else:
-            print(f"    gliner error: {result.stderr}")
-            return False
-    except subprocess.TimeoutExpired:
-        print(f"    gliner timeout")
-        return False
-    except Exception as e:
-        print(f"    gliner exception: {e}")
+    except Exception as exc:
+        print(f"    address extraction exception: {exc}")
         return False
 
 
-def main():
-    print(f"batch etl starting (max {BATCH_SIZE} folders)")
-    
-    case_folders = discover_case_folders(CASE_DIRS_ROOT, limit=BATCH_SIZE)
-    
-    if not case_folders:
-        print("no case folders to process")
-        return
-    
-    success_count = 0
-    fail_count = 0
-    
-    for folder in case_folders:
-        case_id = run_ocr_for_folder(folder)
-        if not case_id:
-            fail_count += 1
-            continue
-        
-        if run_gliner_for_case(case_id):
-            # run address extraction after successful gliner processing
-            run_address_extraction_for_case(case_id)
-            success_count += 1
-        else:
-            fail_count += 1
-    
-    print(f"\n{'='*80}")
-    print(f"batch etl complete")
-    print(f"  successful: {success_count}")
-    print(f"  failed: {fail_count}")
-    print(f"  raw text dir: {RAW_TEXT_DIR}")
-    print(f"  json output dir: {JSON_OUTPUT_DIR}")
-    print(f"{'='*80}")
+with DAG(
+    dag_id="cvg_ocr_batch_etl",
+    start_date=DEFAULT_START_DATE,
+    schedule_interval=DEFAULT_SCHEDULE,
+    catchup=DEFAULT_CATCHUP,
+    max_active_runs=1,
+    tags=["ocr", "cvg", "etl"],
+) as dag:
 
+    @task(task_id="discover_case_ids")
+    def discover_case_ids_task() -> list[str]:
+        return discover_case_ids(CASE_DIRS_ROOT, limit=BATCH_SIZE)
 
-if __name__ == "__main__":
-    main()
+    @task(task_id="run_ocr")
+    def run_ocr_task(case_id: str) -> str | None:
+        return run_ocr_for_case(case_id)
+
+    @task(task_id="run_gliner")
+    def run_gliner_task(case_id: str | None) -> str | None:
+        return run_gliner_for_case(case_id)
+
+    @task(task_id="run_address_extraction")
+    def run_address_task(case_id: str | None) -> bool:
+        return run_address_extraction_for_case(case_id)
+
+    case_ids = discover_case_ids_task()
+    # map each case id through ocr -> gliner -> address extraction
+    ocr_case_ids = run_ocr_task.expand(case_id=case_ids)
+    gliner_case_ids = run_gliner_task.expand(case_id=ocr_case_ids)
+    run_address_task.expand(case_id=gliner_case_ids)
