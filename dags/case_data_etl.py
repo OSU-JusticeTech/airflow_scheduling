@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 import psycopg2
 from bs4 import BeautifulSoup
 import os
+from utils.load_parsed_data import parse_and_insert_from_db
 
 # change this to your local path where HTML files are stored -- and consider moving it to .env variables
 CASES_FILE_DIRECTORY = os.path.expanduser("~/Desktop/justicetech/cases")
@@ -65,6 +66,14 @@ def batch_html_to_postgres():
     conn.close()
     print("All batches processed successfully!")
 
+
+def parse_staged_html_to_models(**context):
+    dag_run = context.get("dag_run")
+    dag_run_id = dag_run.run_id if dag_run else None
+    task = context.get("task")
+    task_id = task.task_id if task else None
+    parse_and_insert_from_db(batch_size=BATCH_SIZE, dag_run_id=dag_run_id, task_id=task_id)
+
 with DAG(
     dag_id="batch_cases_to_postgres",
     start_date=datetime(2025, 10, 22),
@@ -76,5 +85,12 @@ with DAG(
         task_id="batch_html_to_postgres",
         python_callable=batch_html_to_postgres
     )
+
+    task_parse_and_insert = PythonOperator(
+        task_id="parse_html_to_models",
+        python_callable=parse_staged_html_to_models,
+    )
+
+    task_batch_stream >> task_parse_and_insert
     
     

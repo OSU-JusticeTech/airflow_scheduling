@@ -8,6 +8,7 @@ from pathlib import Path
 
 from airflow import DAG
 from airflow.decorators import task
+from airflow.operators.python import get_current_context
 from dotenv import load_dotenv
 
 
@@ -236,6 +237,26 @@ def run_address_extraction_for_case(case_id: str | None) -> bool:
         return False
 
 
+def load_gliner_json_to_db(case_id: str | None, dag_run_id: str | None = None, task_id: str | None = None) -> bool:
+    if not case_id:
+        return False
+
+    json_path = JSON_OUTPUT_DIR / f"{case_id}.json"
+    if not json_path.exists():
+        print(f"    error: gliner json not found: {json_path}")
+        return False
+
+    try:
+        from utils.gliner_django_loader import load_gliner_case_json
+
+        result = load_gliner_case_json(json_path, dag_run_id=dag_run_id, task_id=task_id)
+        print(f"  loaded case {result['case_number']} (id={result['case_id']}) to postgres")
+        return True
+    except Exception as exc:
+        print(f"    db load exception for {case_id}: {exc}")
+        return False
+
+
 with DAG(
     dag_id="cvg_ocr_batch_etl",
     start_date=DEFAULT_START_DATE,
@@ -261,8 +282,17 @@ with DAG(
     def run_address_task(case_id: str | None) -> bool:
         return run_address_extraction_for_case(case_id)
 
+    @task(task_id="load_gliner_json_to_db")
+    def load_gliner_to_db_task(case_id: str | None) -> bool:
+        context = get_current_context()
+        dag_run = context.get("dag_run")
+        dag_run_id = dag_run.run_id if dag_run else None
+        task_id = context.get("task").task_id if context.get("task") else None
+        return load_gliner_json_to_db(case_id, dag_run_id=dag_run_id, task_id=task_id)
+
     case_ids = discover_case_ids_task()
     # map each case id through ocr -> gliner -> address extraction
     ocr_case_ids = run_ocr_task.expand(case_id=case_ids)
     gliner_case_ids = run_gliner_task.expand(case_id=ocr_case_ids)
-    run_address_task.expand(case_id=gliner_case_ids)
+    addressed_case_flags = run_address_task.expand(case_id=gliner_case_ids)
+    load_gliner_to_db_task.expand(case_id=gliner_case_ids).set_upstream(addressed_case_flags)
