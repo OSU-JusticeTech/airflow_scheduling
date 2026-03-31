@@ -2,17 +2,8 @@ import logging
 import psycopg2
 import sys
 from .parsers import parse_case_html
-from .data_insertion import (
-    create_postgres_config,
-    insert_case,
-    insert_party,
-    insert_attorney,
-    insert_disposition,
-    insert_docket_entries, 
-    update_pipeline_status_to_valid,
-    update_pipeline_status_single, 
-    insert_event,
-)
+from .data_insertion import create_postgres_config
+from .gliner_django_loader import load_case_payload
 
 LOG = logging.getLogger(__name__)
 LOG.setLevel(logging.INFO)
@@ -31,7 +22,7 @@ def parse_and_insert_from_db(batch_size=5, dag_run_id=None, task_id=None):
     
     config = create_postgres_config()
     conn = psycopg2.connect(**config)
-    print("✓ Database connection established")
+    print(" Database connection established")
 
     try:
         with conn.cursor() as cur:
@@ -71,19 +62,13 @@ def parse_and_insert_from_db(batch_size=5, dag_run_id=None, task_id=None):
                 
 
                 try:
-                    # insert everything using the same cursor
-                    case_id = insert_case(cur, parsed, dag_run_id)
-                    for p in parsed.get("parties", []):
-                        insert_party(cur, case_id, p)
-                    for a in parsed.get("attorneys", []):
-                        insert_attorney(cur, case_id, a)
-                    insert_disposition(cur, case_id, parsed.get("disposition"))
-                    for e in parsed.get("events", []):
-                        insert_event(cur, case_id, e)
-                    insert_docket_entries(cur, case_id, parsed.get("dockets", []))
-                    
-                    # update pipeline status to 'valid' in CASES after successful insertion
-                    update_pipeline_status_single(cur, case_id, 'Valid', task_id)
+                    result = load_case_payload(
+                        parsed,
+                        source_id=file_name,
+                        dag_run_id=dag_run_id,
+                        task_id=task_id,
+                    )
+                    case_id = result["case_id"]
 
                     # mark raw data as parsed
                     cur.execute(
@@ -100,7 +85,7 @@ def parse_and_insert_from_db(batch_size=5, dag_run_id=None, task_id=None):
                     LOG.error("[error] failed to process file %s: %s", file_name, e, exc_info=True)
     finally:
         conn.close()
-        print("✓ Database connection closed")
+        print("Database connection closed")
         LOG.info("[checkpoint] connection closed after batch processing")
 
 if __name__ == "__main__":

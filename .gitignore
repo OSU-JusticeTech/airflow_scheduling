@@ -243,5 +243,7 @@ airflow.cfg
 #  Plugins directory
 plugins/
 
-
+# Private case data (OCR outputs)
+ocr/texts/
+ocr/raw_text/
 

@@ -65,7 +65,8 @@ The `requirements.txt` includes:
 
 ### 4. Configure Environment Variables
 
-Create a `.env` file in the project root with the following variables:
+Create a `.env` file in the project root with the following variables.
+You can copy defaults from `.env.example`.
 
 ```env
 DB_USER=your_postgres_user
@@ -73,9 +74,22 @@ DB_PASSWORD=your_postgres_password
 DB_HOST=localhost
 DB_PORT=5432
 DB_NAME=justicetech_db
+
+# CVG OCR DAG settings
+CVG_CASE_DIRS_ROOT=~/Desktop/justicetech/k3s.dranspo.se:8000/data
+CVG_OCR_DIR=./ocr
+CVG_RAW_TEXT_DIR=./ocr/raw_text
+CVG_JSON_OUTPUT_DIR=./ocr/texts
+CVG_BATCH_SIZE=3
+CVG_OCR_SCHEDULE=@daily
+CVG_OCR_CATCHUP=false
+CVG_OCR_START_DATE=2026-03-11
+CVG_GLINER_TIMEOUT_SECONDS=180
+CVG_ADDRESS_TIMEOUT_SECONDS=60
 ```
 
-These variables are used by the Airflow DAGs to connect to PostgreSQL.
+`DB_*` variables are used for database connections.
+`CVG_*` variables configure the `cvg_ocr_batch_etl` DAG runtime behavior.
 
 ## Database Setup
 
