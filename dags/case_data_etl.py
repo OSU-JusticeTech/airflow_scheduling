@@ -7,14 +7,20 @@ from bs4 import BeautifulSoup
 import os
 import sys
 import re
+import signal
+import requests
+from requests.exceptions import Timeout, ConnectionError
 
 # add project root to Python path
 sys.path.append('/Users/dishapatel/airflow_scheduling')
 
 try:
-    from utils.parsers import extract_parties_from_text, extract_attorneys_from_text
+    from utils.XML_parser import parse_case_html, make_case
+    from utils.pyschema import Case, SideAddress, Attorney, FakeAttorney, RunningAttorney, PublicAttorney
+    XML_PARSER_AVAILABLE = True
 except ImportError:
-    print("Warning: Could not import parsers - address extraction will be disabled")
+    print("ERROR: Could not import XML parser - import failed at module load time")
+    XML_PARSER_AVAILABLE = False
 
 # change this to your local path where HTML files are stored -- and consider moving it to .env variables
 CASES_FILE_DIRECTORY = os.path.expanduser("~/JusticeTech/cases")
@@ -129,7 +135,20 @@ def batch_html_to_postgres():
 def extract_and_geocode_addresses():
     """Extract new addresses AND geocode existing ones using CURA service"""
     import time
-        
+    
+    def timeout_handler(signum, frame):
+        """Signal handler for geocoding timeout"""
+        raise TimeoutError("CURA geocoding request timeout (10 seconds)")
+    
+    def is_po_box_address(address_line1):
+        """Check if address is a P.O. Box (these don't geocode well)"""
+        if not address_line1:
+            return False
+        # Use simple substring checks instead of regex for reliability
+        address_upper = address_line1.upper()
+        po_indicators = ['P.O. BOX', 'P.O BOX', 'PO BOX', 'POB', 'POBOX', 'P O BOX']
+        return any(indicator in address_upper for indicator in po_indicators)
+    
     conn = psycopg2.connect(
         dbname=DB_NAME,
         user=DB_USER,
@@ -140,189 +159,585 @@ def extract_and_geocode_addresses():
     cur = conn.cursor()
     
     start_time = time.time()
-    max_runtime = 6 * 60  # 6 minutes absolute max runtime
+    max_runtime = 4 * 60
+    extraction_time_limit = 60
+    geocoding_time_limit = 2.5 * 60  
     
-    # extract new addresses from unprocessed cases
+    # First, get the total count of unprocessed cases
     cur.execute("""
-        SELECT r.case_number, r.raw_html 
+        SELECT COUNT(*) 
         FROM raw_cases r
-        LEFT JOIN address a ON r.case_number = a.case_number
-        WHERE a.case_number IS NULL 
+        WHERE NOT EXISTS (
+            SELECT 1 FROM cases c WHERE c.case_number = r.case_number
+        )
         AND r.raw_html IS NOT NULL
-        LIMIT 20
     """)
     
-    unprocessed_cases = cur.fetchall()    
-    total_extracted = 0
+    total_unprocessed = cur.fetchone()[0]
+    print(f"📊 PROCESSING STATUS: {total_unprocessed} cases remaining to process")
     
-    for case_number, raw_html in unprocessed_cases:
-        if time.time() - start_time > 60:  
-            print("time limit reached for extraction")
-            break
-            
-        try:
-            addresses = extract_addresses_simple(raw_html, case_number)
-            
-            for addr in addresses:
-                try:
-                    cur.execute("""
-                        INSERT INTO address (case_number, address_type, address_line1, city, state, 
-                                           postal_code, geocode_status)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    """, (
-                        case_number,
-                        addr.get('address_type', 'unknown'),
-                        addr.get('address_line1', ''),
-                        addr.get('city', ''),
-                        addr.get('state', ''),
-                        addr.get('postal_code', ''),
-                        'extracted'
-                    ))
-                    total_extracted += 1
-                except Exception as e:
-                    print(f"Error inserting address for case {case_number}: {e}")
-            
-        except Exception as e:
-            print(f"Error processing addresses for case {case_number}: {e}")
-    
-    conn.commit()
-    print(f"extracted {total_extracted} new addresses")
-    
-    # geocode existing addresses (mock + extracted) using CURA    
-    # initialize CURA geocoding service
-    try:
-        sys.path.append('/Users/dishapatel/airflow_scheduling')
-        from utils.geolocation import create_geolocation_service
-        geo_service = create_geolocation_service()
-    except Exception as e:
-        print(f"failed to initialize CURA geocoding service: {e}")
-        cur.close()
-        conn.close()
-        return
-    
-    # fixed batch size for reliable DAG execution - process 8 addresses per DAG run
-    batch_size = 8  
-    
-    cur.execute("""
-        SELECT address_id, case_number, address_line1, city, state, postal_code, geocode_status
-        FROM address
-        WHERE geocode_status IN ('mock', 'extracted')
-        AND address_line1 IS NOT NULL
-        AND address_line1 != ''
-        AND (latitude = 0 OR latitude IS NULL)
-        ORDER BY 
-            CASE geocode_status 
-                WHEN 'mock' THEN 1 
-                WHEN 'extracted' THEN 2 
-            END,
-            address_id ASC
-        LIMIT %s
-    """, (batch_size,))
-    
-    addresses_to_geocode = cur.fetchall()
-    geocoded_count = 0
-    
-    if not addresses_to_geocode:
-        print("NO mock or extracted addresses found to geocode!")
-        cur.close()
-        conn.close()
-        return
-    
-    for i, (address_id, case_number, address_line1, city, state, postal_code, status) in enumerate(addresses_to_geocode):
-        if time.time() - start_time > max_runtime:
-            print(f"runtime limit reached, stopping at address {i}")
-            break
-            
-        print(f"\n  Processing address {i+1}/{len(addresses_to_geocode)}:")
-        print(f"    ID: {address_id} | Status: {status}")
-        print(f"    Address: {address_line1}, {city}, {state} {postal_code}")
+    # PHASE 1: Extract addresses, parties, and attorneys from new cases
+    if total_unprocessed > 0:
+        print("🔧 PHASE 1: Extracting data from new cases...")
         
+        # extract new addresses from unprocessed cases
+        cur.execute("""
+            SELECT r.case_number, r.raw_html 
+            FROM raw_cases r
+            WHERE NOT EXISTS (
+                SELECT 1 FROM cases c WHERE c.case_number = r.case_number
+            )
+            AND r.raw_html IS NOT NULL
+            LIMIT 5
+        """)
+        
+        unprocessed_cases = cur.fetchall()
+        print(f"Processing batch of {len(unprocessed_cases)} cases from {total_unprocessed} remaining")    
+        total_extracted = 0
+        total_parties = 0
+        total_attorneys = 0
+        
+        for case_number, raw_html in unprocessed_cases:
+            if time.time() - start_time > extraction_time_limit:  
+                print("Extraction time limit reached!")
+                break
+                
+            try:
+                # Extract data using XML parser (enforced - no fallback)
+                case_data = extract_case_data_with_xml_parser(raw_html, case_number)
+                
+                if case_data:
+                    # Create or get case
+                    cur.execute("""
+                        SELECT case_id FROM cases WHERE case_number = %s
+                    """, (case_number,))
+                    
+                    case_result = cur.fetchone()
+                    if not case_result:
+                        cur.execute("""
+                            INSERT INTO cases (case_number, case_title, pipeline_status)
+                            VALUES (%s, %s, %s) RETURNING case_id
+                        """, (case_number, case_data.get('case_title', f"Case {case_number}"), 'processing'))
+                        case_id = cur.fetchone()[0]
+                    else:
+                        case_id = case_result[0]
+                    
+                    # Insert addresses (with duplicate check)
+                    for addr_data in case_data.get('addresses', []):
+                        address_line1 = addr_data.get('address_line1', '').strip()
+                        city = addr_data.get('city', '').strip()
+                        state = addr_data.get('state', 'OH').strip()
+                        postal_code = addr_data.get('postal_code', '').strip()
+                        
+                        # Check if address already exists
+                        cur.execute("""
+                            SELECT address_id FROM addresses 
+                            WHERE address_line1 = %s AND city = %s AND state = %s AND postal_code = %s
+                            LIMIT 1
+                        """, (address_line1, city, state, postal_code))
+                        
+                        existing_address = cur.fetchone()
+                        if existing_address:
+                            address_id = existing_address[0]
+                            print(f"        Using existing address ID {address_id}: {address_line1}")
+                        else:
+                            # Insert new address
+                            cur.execute("""
+                                INSERT INTO addresses (address_line1, address_line2, city, state, 
+                                                     country, postal_code, created_at)
+                                VALUES (%s, %s, %s, %s, %s, %s, NOW()) RETURNING address_id
+                            """, (
+                                address_line1,
+                                addr_data.get('address_line2', ''),
+                                city,
+                                state,
+                                addr_data.get('country', 'USA'),
+                                postal_code
+                            ))
+                            address_id = cur.fetchone()[0]
+                            print(f"        Created new address ID {address_id}: {address_line1}")
+                            total_extracted += 1
+                        
+                        # Store address_id for linking to entities
+                        addr_data['address_id'] = address_id
+                    
+                    # Insert parties and link addresses (with duplicate check)
+                    for party_data in case_data.get('parties', []):
+                        party_name = party_data.get('name', '').strip()
+                        party_type = party_data.get('type', '').strip()
+                        
+                        # Check if party already exists for this case with same name and address
+                        party_address_id = None
+                        
+                        for addr_data in case_data.get('addresses', []):
+                            if addr_data.get('entity_type') == 'party' and addr_data.get('entity_name') == party_name:
+                                party_address_id = addr_data.get('address_id')
+                                break
+                        
+                        cur.execute("""
+                            SELECT party_id FROM party 
+                            WHERE case_id = %s AND party_name = %s AND address_id = %s
+                            LIMIT 1
+                        """, (case_id, party_name, party_address_id))
+                        
+                        existing_party = cur.fetchone()
+                        if existing_party:
+                            party_id = existing_party[0]
+                            print(f"         Reusing existing party: {party_name} (ID {party_id})")
+                        else:
+                            # Insert new party
+                            cur.execute("""
+                                INSERT INTO party (case_id, party_name, party_type, address_id)
+                                VALUES (%s, %s, %s, %s) RETURNING party_id
+                            """, (case_id, party_name, party_type, party_address_id))
+                            party_id = cur.fetchone()[0]
+                            total_parties += 1
+                            print(f"        Created new party: {party_name} (ID {party_id})")
+                    
+                    # Insert attorneys using normalized structure (with duplicate check)
+                    for attorney_data in case_data.get('attorneys', []):
+                        attorney_name = attorney_data.get('name', '').strip()
+                        attorney_type = attorney_data.get('type', '').strip()
+                        
+                        # Find matching address for this attorney first
+                        attorney_address_id = None
+                        
+                        for addr_data in case_data.get('addresses', []):
+                            if addr_data.get('entity_type') == 'attorney' and addr_data.get('entity_name') == attorney_name:
+                                attorney_address_id = addr_data.get('address_id')
+                                break
+                        
+                        # STEP 1: Insert/find attorney as ENTITY (person) - normalized system without case_id
+                        if attorney_address_id:
+                            cur.execute("""
+                                SELECT attorney_id FROM attorneys 
+                                WHERE attorney_name = %s AND address_id = %s
+                                LIMIT 1
+                            """, (attorney_name, attorney_address_id))
+                        else:
+                            cur.execute("""
+                                SELECT attorney_id FROM attorneys 
+                                WHERE attorney_name = %s AND address_id IS NULL
+                                LIMIT 1
+                            """, (attorney_name,))
+                        
+                        existing_attorney_entity = cur.fetchone()
+                        if existing_attorney_entity:
+                            attorney_entity_id = existing_attorney_entity[0]
+                            print(f"         Reusing attorney entity: {attorney_name} (ID {attorney_entity_id})")
+                        else:
+                            # Insert new attorney ENTITY using normalized system
+                            cur.execute("""
+                                INSERT INTO attorneys (attorney_name, address_id, created)
+                                VALUES (%s, %s, %s) RETURNING attorney_id
+                            """, (attorney_name, attorney_address_id, datetime.now()))
+                            attorney_entity_id = cur.fetchone()[0]
+                            total_attorneys += 1
+                            print(f"        Created new attorney entity: {attorney_name} (ID {attorney_entity_id})")
+                        
+                        # STEP 2: Create attorney-case RELATIONSHIP
+                        cur.execute("""
+                            SELECT case_attorney_id FROM case_attorneys 
+                            WHERE case_id = %s AND attorney_id = %s AND attorney_type = %s
+                            LIMIT 1
+                        """, (case_id, attorney_entity_id, attorney_type))
+                        
+                        existing_relationship = cur.fetchone()
+                        if existing_relationship:
+                            print(f"        Relationship already exists: Case {case_id} ↔ Attorney {attorney_entity_id} ({attorney_type})")
+                        else:
+                            # Insert new case-attorney relationship
+                            cur.execute("""
+                                INSERT INTO case_attorneys (case_id, attorney_id, attorney_type, created)
+                                VALUES (%s, %s, %s, %s) RETURNING case_attorney_id
+                            """, (case_id, attorney_entity_id, attorney_type, datetime.now()))
+                            case_attorney_id = cur.fetchone()[0]
+                            print(f"      🔗 Created relationship: Case {case_id} ↔ Attorney {attorney_entity_id} ({attorney_type})")
+                
+            except Exception as e:
+                # Log error, close DB, and re-raise so Airflow task fails
+                print(f"❌ ERROR processing case {case_number}: {e}")
+                cur.close()
+                conn.close()
+                raise
+        
+        conn.commit()
+        print(f"  PHASE 1 COMPLETE: {total_extracted} new addresses, {total_parties} new parties, {total_attorneys} new attorneys")
+    else:
+        print("  No new cases to process")
+    
+    # PHASE 2: Geocode existing addresses (with time limit)
+    if time.time() - start_time < geocoding_time_limit:
+        print("  PHASE 2: Geocoding addresses...")
+        
+        # Initialize CURA geocoding service
         try:
-            # geocode using CURA
-            address_start = time.time()
-            result = geo_service.geocode_address({
-                'address_line1': address_line1,
-                'city': city if city != 'Unknown' else '',
-                'state': state or 'OH',
-                'postal_code': postal_code or ''
-            })
-            
-            geocode_time = time.time() - address_start
-            print(f"      CURA response time: {geocode_time:.2f} seconds")
-            
-            # skip addresses that take too long (timeout protection)
-            if geocode_time > 20:
-                print(f"address {address_id} took {geocode_time:.1f}s, marking as timeout")
-                cur.execute("""
-                    UPDATE address SET geocode_status = 'timeout' WHERE address_id = %s
-                """, (address_id,))
-                continue
-            
-            if result['status'] == 'success':
-                # update database with real coordinates
-                cur.execute("""
-                    UPDATE address 
-                    SET latitude = %s, longitude = %s, geocode_status = %s, geocoded_at = %s
-                    WHERE address_id = %s
-                """, (
-                    result['latitude'],
-                    result['longitude'],
-                    'success',
-                    datetime.now(),
-                    address_id
-                ))
-                geocoded_count += 1
-                print(f"      SUCCESS: {result['latitude']:.6f}, {result['longitude']:.6f}")
-                
-                # update city if it was Unknown
-                if city == 'Unknown' and result.get('address_details', {}).get('City'):
-                    geocoded_city = result['address_details']['City']
-                    cur.execute("""
-                        UPDATE address SET city = %s WHERE address_id = %s
-                    """, (geocoded_city, address_id))
-                else:
-                    # update status to indicate failure
-                    cur.execute("""
-                        UPDATE address SET geocode_status = %s WHERE address_id = %s
-                    """, (result['status'], address_id))
-            
-            # save progress frequently (every 2 addresses)
-            if (i + 1) % 2 == 0:
-                conn.commit()
-                print(f"      Progress saved: {i + 1}/{len(addresses_to_geocode)} processed")
-            
-            # small delay for CURA service
-            time.sleep(0.5)
-                
+            from utils.geolocation import create_geolocation_service
+            geo_service = create_geolocation_service()
         except Exception as e:
-            print(f"       ERROR: {e}")
-            cur.execute("""
-                UPDATE address SET geocode_status = 'error' WHERE address_id = %s
-            """, (address_id,))
+            print(f"Failed to initialize CURA geocoding service: {e}")
+            cur.close()
+            conn.close()
+            return
+        
+        # Geocode only PARTY addresses
+        cur.execute("""
+            SELECT a.address_id, a.address_line1, a.city, a.state, a.postal_code,
+                   'party' as entity_type, p.party_name as entity_name, a.created_at
+            FROM addresses a
+            JOIN party p ON a.address_id = p.address_id
+            WHERE a.address_id NOT IN (
+                SELECT DISTINCT address_id 
+                FROM geocoded_addresses 
+                WHERE geocode_status IN ('success', 'timeout', 'failed', 'skipped_po_box')
+                AND address_id IS NOT NULL
+            )
+            AND a.address_line1 IS NOT NULL
+            AND a.address_line1 != ''
+            ORDER BY a.created_at ASC
+            LIMIT 10
+        """)
+        
+        addresses_to_geocode = cur.fetchall()
+        geocoded_count = 0
+        
+        if addresses_to_geocode:
+            print(f"Geocoding {len(addresses_to_geocode)} party addresses...")
+            print(f"  CURA BATCH STARTED: {len(addresses_to_geocode)} addresses queued for geocoding")
+            
+            # Geocode each address individually
+            for i, (address_id, address_line1, city, state, postal_code, entity_type, entity_name, created_at) in enumerate(addresses_to_geocode):
+                # Check time limits
+                if time.time() - start_time > max_runtime or time.time() - start_time > geocoding_time_limit:
+                    print(f"  Time limit reached, stopping")
+                    break
+                
+                if time.time() - start_time > (max_runtime * 0.8):
+                    print(f"  Approaching max runtime, stopping")
+                    break
+                
+                # Verify party-address relationship
+                cur.execute("SELECT 1 FROM party WHERE address_id = %s LIMIT 1", (address_id,))
+                if not cur.fetchone():
+                    continue
+                
+                # Skip P.O. Box addresses - they don't geocode well
+                if is_po_box_address(address_line1):
+                    print(f"\n  [{i+1}/{len(addresses_to_geocode)}] {entity_name}: {address_line1}")
+                    print(f"         SKIPPED: P.O. Box addresses cannot be geocoded")
+                    try:
+                        cur.execute("INSERT INTO geocoded_addresses (address_id, geocode_status, geocoded_at, geocode_service) VALUES (%s, %s, NOW(), %s) ON CONFLICT (address_id) DO UPDATE SET geocode_status = EXCLUDED.geocode_status", (address_id, 'skipped_po_box', 'CURA'))
+                        conn.commit()
+                    except:
+                        pass
+                    continue
+                
+                print(f"\n  [{i+1}/{len(addresses_to_geocode)}] {entity_name}: {address_line1}")
+                
+                try:
+                    address_start = time.time()
+                    
+                    # Log CURA request
+                    request_payload = {
+                        'address_line1': address_line1,
+                        'city': city if city != 'Unknown' else '',
+                        'state': state or 'OH',
+                        'postal_code': postal_code or ''
+                    }
+                    print(f"         CURA REQUEST SENT (Address ID {address_id}):")
+                    print(f"           {request_payload}")
+
+                    try:
+                        # Use timeout on the geocoding call directly
+                        result = geo_service.geocode_address(request_payload, timeout=5)
+                    except (Timeout, ConnectionError, TimeoutError) as te:
+                        geocode_time = time.time() - address_start
+                        print(f"        CURA RESPONSE (TIMEOUT after {geocode_time:.2f}s)")
+                        try:
+                            cur.execute("INSERT INTO geocoded_addresses (address_id, geocode_status, geocoded_at, geocode_service) VALUES (%s, %s, NOW(), %s) ON CONFLICT (address_id) DO UPDATE SET geocode_status = EXCLUDED.geocode_status", (address_id, 'timeout', 'CURA'))
+                            conn.commit()
+                        except:
+                            pass
+                        continue
+                    
+                    geocode_time = time.time() - address_start
+                    
+                    # Log CURA response
+                    if result['status'] == 'success':
+                        lat = result.get('latitude', 'N/A')
+                        lng = result.get('longitude', 'N/A')
+                        print(f"        CURA RESPONSE SUCCESS ({geocode_time:.2f}s): Lat={lat}, Lng={lng}")
+                        cur.execute("INSERT INTO geocoded_addresses (address_id, latitude, longitude, geocode_status, geocoded_at, geocode_service) VALUES (%s, %s, %s, %s, NOW(), %s) ON CONFLICT (address_id) DO UPDATE SET latitude = EXCLUDED.latitude, longitude = EXCLUDED.longitude, geocode_status = EXCLUDED.geocode_status", (address_id, result['latitude'], result['longitude'], 'success', 'CURA'))
+                        geocoded_count += 1
+                        print(f"        SUCCESS - Stored in database")
+                    else:
+                        status = result.get('status', 'unknown')
+                        print(f"        CURA RESPONSE ({geocode_time:.2f}s): Status={status}")
+                        cur.execute("INSERT INTO geocoded_addresses (address_id, geocode_status, geocoded_at, geocode_service) VALUES (%s, %s, NOW(), %s) ON CONFLICT (address_id) DO UPDATE SET geocode_status = EXCLUDED.geocode_status", (address_id, status, 'CURA'))
+                    
+                    conn.commit()
+                    time.sleep(0.1)
+                        
+                except Exception as e:
+                    geocode_time = time.time() - address_start
+                    print(f"      ❌ ERROR ({geocode_time:.2f}s): {type(e).__name__}: {e}")
+                    try:
+                        cur.execute("INSERT INTO geocoded_addresses (address_id, geocode_status, geocoded_at, geocode_service) VALUES (%s, %s, NOW(), %s) ON CONFLICT (address_id) DO UPDATE SET geocode_status = EXCLUDED.geocode_status", (address_id, 'error', 'CURA'))
+                        conn.commit()
+                    except:
+                        pass
+            
+            print(f"  PHASE 2 COMPLETE: {geocoded_count} addresses geocoded")
+        else:
+            print("  No party addresses ready for geocoding")
+    else:
+        print("  Skipping geocoding phase - extraction took too long")
     
     conn.commit()
     
-    cur.execute("SELECT geocode_status, COUNT(*) FROM address GROUP BY geocode_status ORDER BY COUNT(*) DESC")
+    # Final status report
+    cur.execute("SELECT geocode_status, COUNT(*) FROM geocoded_addresses GROUP BY geocode_status ORDER BY COUNT(*) DESC")
     status_counts = cur.fetchall()
     
-    cur.execute("SELECT COUNT(*) FROM address WHERE geocode_status IN ('mock', 'extracted') AND (latitude = 0 OR latitude IS NULL)")
-    remaining = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM addresses a JOIN party p ON a.address_id = p.address_id WHERE a.address_id NOT IN (SELECT DISTINCT address_id FROM geocoded_addresses WHERE address_id IS NOT NULL)")
+    remaining_addresses = cur.fetchone()[0]
+    
+    # Get final count of unprocessed case files
+    cur.execute("""
+        SELECT COUNT(*) 
+        FROM raw_cases r
+        WHERE NOT EXISTS (
+            SELECT 1 FROM cases c WHERE c.case_number = r.case_number
+        )
+        AND r.raw_html IS NOT NULL
+    """)
+    remaining_files = cur.fetchone()[0]
     
     runtime = time.time() - start_time
-    print(f"\n. TASK COMPLETE:")
-    print(f"    New addresses extracted: {total_extracted}")
-    print(f"    Addresses geocoded: {geocoded_count}")
-    print(f"    Remaining to process: {remaining}")
-    print(f"    Total runtime: {runtime:.1f} seconds")
-    print(f"    Current status counts:")
+    print(f"\n  DAG RUN SUMMARY:")
+    print(f"    Runtime: {runtime:.1f} seconds")
+    print(f"    Remaining cases to process: {remaining_files}")
+    print(f"    Remaining addresses to geocode: {remaining_addresses}")
+    print(f"    Geocoding status distribution:")
     for status, count in status_counts:
-        print(f"     {status}: {count}")
+        print(f"      {status}: {count}")
     
     cur.close()
     conn.close()
     
 
+def extract_case_data_with_xml_parser(html_content, case_number):
+    """Extract comprehensive case data using XML parser only (no fallback).
+    Raises RuntimeError if XML parser is unavailable or fails.
+    """
+
+    # Enforce XML parser availability
+    if not XML_PARSER_AVAILABLE:
+        raise RuntimeError(f"XML parser not available for {case_number} - import failed at DAG startup. Ensure utils.XML_parser is installed and importable.")
+
+    try:
+        print(f"    Extracting full case data for {case_number}")
+
+        # Parse the case using XML parser
+        parsed_data = parse_case_html(html_content)
+        case_obj = make_case(parsed_data)
+
+        # Enforce that parser returned a valid case object
+        if case_obj is None:
+            raise RuntimeError(f"XML parser returned None for {case_number} - parse_case_html or make_case failed")
+
+        case_data = {
+            'case_number': case_number,
+            'case_title': getattr(case_obj, 'case_title', f"Case {case_number}"),
+            'parties': [],
+            'attorneys': [],
+            'addresses': []
+        }
+
+        address_counter = 0
+
+        # Extract parties and their addresses
+        print(f"  Processing {len(case_obj.parties)} parties")
+        for i, party in enumerate(case_obj.parties):
+            party_name = getattr(party, 'name', f'Party {i+1}')
+            party_type = 'Unknown'
+
+            # Determine party type based on class or attributes
+            if isinstance(party, SideAddress):
+                party_type = getattr(party, 'side', 'Party')
+
+            party_data = {
+                'name': party_name,
+                'type': party_type,
+                'has_address': False,
+                'address': None
+            }
+
+            # Extract party address if available
+            if hasattr(party, 'address') and party.address:
+                address_line = ' '.join(party.address) if isinstance(party.address, list) else str(party.address)
+
+                if address_line and address_line.strip():
+                    # Handle combined address format like "319 Oxford Oak Dr, Blacklick, Ohio, 43004"
+                    street_address = address_line.strip()
+                    city = getattr(party, 'city', 'Unknown')
+                    state = getattr(party, 'state', 'OH')
+                    postal_code = getattr(party, 'zip_', '')
+
+                    # Parse combined address if it contains commas
+                    if ',' in address_line:
+                        try:
+                            parts = [part.strip() for part in address_line.split(',')]
+                            if len(parts) >= 4:
+                                # "Street, City, State, ZIP" format
+                                street_address = parts[0]
+                                city = parts[1] if parts[1] != 'Unknown' else city
+                                state = parts[2] if parts[2] != 'Unknown' else state
+                                postal_code = parts[3] if parts[3] else postal_code
+                            elif len(parts) == 3:
+                                # "Street, City, State ZIP" format  
+                                street_address = parts[0]
+                                city = parts[1] if parts[1] != 'Unknown' else city
+                                # Try to split state and ZIP from last part
+                                state_zip = parts[2].strip()
+                                match = re.match(r'^([A-Za-z\s]+?)\s*(\d{5}(?:-\d{4})?)$', state_zip)
+                                if match:
+                                    state = match.group(1).strip() if match.group(1).strip() != 'Unknown' else state
+                                    postal_code = match.group(2)
+                                else:
+                                    state = state_zip if state_zip != 'Unknown' else state
+                        except Exception as e:
+                            print(f"    Warning: Could not parse combined address '{address_line}': {e}")
+
+                    address_data = {
+                        'address_line1': street_address,
+                        'city': city,
+                        'state': state,
+                        'postal_code': postal_code,
+                        'entity_type': 'party',
+                        'entity_name': party_name
+                    }
+                    # Set address on party object for processing
+                    party_data['has_address'] = True
+                    party_data['address'] = {
+                        'line1': street_address,
+                        'city': city,
+                        'state': state,
+                        'postal_code': postal_code
+                    }
+
+                    case_data['addresses'].append(address_data)
+                    address_counter += 1
+
+            # Append party once (no duplicates)
+            case_data['parties'].append(party_data)
+
+        # Extract attorneys and their addresses
+        print(f"  Processing {len(case_obj.attorneys)} attorneys")
+        for i, attorney in enumerate(case_obj.attorneys):
+            attorney_name = getattr(attorney, 'name', f'Attorney {i+1}')
+            attorney_type = getattr(attorney, 'type', 'Attorney')
+
+            # Skip fake attorneys
+            try:
+                if isinstance(attorney, FakeAttorney):
+                    continue
+            except NameError:
+                # FakeAttorney not available, fallback to name-based check
+                if "fake" in attorney_name.lower() or "placeholder" in attorney_name.lower():
+                    continue
+
+            # Try to determine which party this attorney represents
+            representing_party = None
+            if hasattr(attorney, 'party') and attorney.party:
+                representing_party = getattr(attorney.party, 'name', None)
+
+            attorney_data = {
+                'name': attorney_name,
+                'type': attorney_type,
+                'representing_party': representing_party,
+                'has_address': False,
+                'address': None
+            }
+
+            # Extract attorney address if available
+            if hasattr(attorney, 'address') and attorney.address:
+                address_line = ' '.join(attorney.address) if isinstance(attorney.address, list) else str(attorney.address)
+
+                # Skip placeholder addresses
+                if ("***runners will pick up daily***" in address_line or 
+                    "DO NOT USE" in address_line or 
+                    not address_line.strip()):
+                    continue
+
+                # Extract or infer city/state/zip
+                city = getattr(attorney, 'city', '')
+                state = getattr(attorney, 'state', 'OH')
+                postal_code = getattr(attorney, 'zip_', '')
+
+                # Try to extract from address if missing
+                if not city or not postal_code:
+                    # Pattern for "City, State Zip"
+                    city_state_zip_pattern = r'([A-Za-z\s]+),\s*([A-Z]{2})\s+(\d{5})'
+                    match = re.search(city_state_zip_pattern, address_line)
+
+                    if match:
+                        city = city or match.group(1).strip()
+                        state = state or match.group(2)
+                        postal_code = postal_code or match.group(3)
+                    else:
+                        # Try to find zip pattern
+                        zip_pattern = r'\b(\d{5})\b'
+                        zip_match = re.search(zip_pattern, address_line)
+                        if zip_match:
+                            postal_code = postal_code or zip_match.group(1)
+
+                        # Try to find common Ohio cities in the address
+                        ohio_cities = [
+                            'COLUMBUS', 'CLEVELAND', 'CINCINNATI', 'TOLEDO', 'AKRON', 'DAYTON', 'PARMA', 
+                            'CANTON', 'YOUNGSTOWN', 'DUBLIN', 'WESTERVILLE', 'GROVE CITY', 'HILLIARD',
+                            'REYNOLDSBURG', 'GAHANNA', 'UPPER ARLINGTON', 'BEXLEY', 'WORTHINGTON',
+                            'CANAL WINCHESTER', 'PICKERINGTON', 'DELAWARE', 'BLACKLICK', 'GALLOWAY',
+                            'ORIENT', 'LORAIN', 'HAMILTON', 'FAIRBORN', 'HUBBARD', 'FOREST', 'BELLEVUE'
+                        ]
+                        for ohio_city in ohio_cities:
+                            if ohio_city in address_line.upper():
+                                city = city or ohio_city.title()
+                                break
+
+                address_data = {
+                    'address_line1': address_line,
+                    'city': city or 'Unknown',
+                    'state': state,
+                    'postal_code': postal_code,
+                    'entity_type': 'attorney',
+                    'entity_name': attorney_name
+                }
+
+                # Set address on attorney object for processing
+                attorney_data['has_address'] = True
+                attorney_data['address'] = {
+                    'line1': address_line,
+                    'city': city or 'Unknown',
+                    'state': state,
+                    'postal_code': postal_code
+                }
+
+                case_data['addresses'].append(address_data)
+                address_counter += 1
+
+            case_data['attorneys'].append(attorney_data)
+
+        print(f"  ✅ Extracted: {len(case_data['parties'])} parties, {len(case_data['attorneys'])} attorneys, {address_counter} addresses")
+        return case_data
+
+    except Exception as e:
+        # Raise error (no fallback) so caller and Airflow can see the failure
+        raise RuntimeError(f"XML parser failed for {case_number}: {e}")
+
+
 def extract_addresses_simple(html_content, case_number):
+    """Legacy simple extraction - kept for backwards compatibility if needed"""
     addresses = []
     
     address_patterns = [

@@ -14,7 +14,7 @@ def extract_parties_from_text(text):
     )
     for m in party_pattern.finditer(text):
         parties.append({
-            "type": m.group("type").title(),
+            "type": m.group("type").upper(),
             "name": m.group("name").strip(),
             "address": m.group("address").strip(),
             "city": m.group("city").strip(),
@@ -36,7 +36,7 @@ def extract_attorneys_from_text(text):
         city = city_state_zip[0].strip()
         state_zip = city_state_zip[1].strip() if len(city_state_zip) > 1 else None
         attorneys.append({
-            "party_type": m.group("party_type").title(),
+            "party_type": m.group("party_type").upper(),
             "attorney_name": m.group("name").strip(),
             "address": m.group("address").strip(),
             "city": city,

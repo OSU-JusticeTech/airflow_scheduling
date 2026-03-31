@@ -1,7 +1,6 @@
 from sqlalchemy import Column, BigInteger, String, Text, Date, TIMESTAMP, Identity
 from sqlalchemy.orm import relationship
 from .base import Base
-from .association_tables import case_party
 from sqlalchemy import func
 
 class Case(Base):
@@ -23,7 +22,12 @@ class Case(Base):
     # in progrss -- wip,holds values "new", "valid", "error", "closed"
     pipeline_status = Column(String, default='New', nullable=False) 
 
-    parties = relationship("Party", secondary=case_party, back_populates="cases")
+    # Direct relationships to parties and attorneys
+    parties = relationship("Party", back_populates="case")
+    attorneys = relationship("Attorney", back_populates="case")
+    geocoded_addresses = relationship("GeocodedAddress", back_populates="case")
+    
+    # Other relationships
     dispositions = relationship("Disposition", back_populates="case")
     events = relationship("Event", back_populates="case")
     dockets = relationship("Docket", back_populates="case")

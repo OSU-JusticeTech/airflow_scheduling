@@ -223,7 +223,6 @@ airflow users create \
 
 ```bash
 # Start the web UI on http://localhost:8080
-airflow webserver -p 8080
 ```
 
 ### 4. Start the Airflow Scheduler (in a separate terminal)
