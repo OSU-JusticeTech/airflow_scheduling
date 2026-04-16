@@ -10,7 +10,18 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
+
+
+def _default_settings_module() -> str:
+    for child in PROJECT_ROOT.iterdir():
+        if not child.is_dir():
+            continue
+        if (child / "settings.py").exists() and (child / "__init__.py").exists():
+            return f"{child.name}.settings"
+    return "config.settings"
+
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", _default_settings_module())
 
 import django  # noqa: E402
 

@@ -5,6 +5,7 @@ from .cases import Case
 from .party import Party
 from .attorney import Attorney
 from .address import Address
+from .geocoded_address import GeocodedAddress
 from .disposition import Disposition
 from .events import Event
 from .docket import Docket

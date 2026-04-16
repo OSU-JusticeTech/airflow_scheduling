@@ -7,10 +7,11 @@ class Attorney(Base):
     __tablename__ = "attorney"
 
     attorney_id = Column(BigInteger, Identity(always=True), primary_key=True)
+    case_id = Column(BigInteger, ForeignKey("cases.case_id"), nullable=False)
     attorney_name = Column(String)
     party_id = Column(BigInteger, ForeignKey("party.party_id"))
     attorney_type = Column(String)
-    address_id = Column(BigInteger, ForeignKey("address.address_id"))
+    address_id = Column(BigInteger, ForeignKey("addresses.address_id"))
 
     created = Column(TIMESTAMP(timezone=True), server_default=func.now())
     created_dag_run_id = Column(String)
@@ -18,5 +19,7 @@ class Attorney(Base):
     updated = Column(TIMESTAMP(timezone=True), onupdate=func.now())
     updated_task_id = Column(String)
 
+    # Relationships
+    case = relationship("Case", back_populates="attorneys")
     party = relationship("Party", back_populates="attorneys")
-    address = relationship("Address")
+    address = relationship("Address", back_populates="attorneys")
