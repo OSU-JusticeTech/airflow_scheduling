@@ -6,28 +6,13 @@ This script helps migrate data from the old schema to the new schema.
 """
 
 import psycopg2
-import os
-from dotenv import load_dotenv
 from datetime import datetime
-
-load_dotenv()
-
-DB_PASSWORD = os.getenv("DB_PASSWORD")
-DB_USER = os.getenv("DB_USER")
-DB_HOST = os.getenv("DB_HOST")
-DB_PORT = os.getenv("DB_PORT")
-DB_NAME = os.getenv("DB_NAME")
+from config.runtime import DB_CONFIG
 
 def migrate_address_data():
     """Migrate data from old address table to new addresses and geocoded_addresses tables"""
     
-    conn = psycopg2.connect(
-        dbname=DB_NAME,
-        user=DB_USER,
-        password=DB_PASSWORD,
-        host=DB_HOST,
-        port=DB_PORT
-    )
+    conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
     
     try:
@@ -144,13 +129,7 @@ def migrate_address_data():
 def create_sample_case_data():
     """Create sample cases, parties, and attorneys for testing the new schema"""
     
-    conn = psycopg2.connect(
-        dbname=DB_NAME,
-        user=DB_USER,
-        password=DB_PASSWORD,
-        host=DB_HOST,
-        port=DB_PORT
-    )
+    conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
     
     try:
@@ -266,13 +245,7 @@ def create_sample_case_data():
 def verify_schema():
     """Verify the new schema structure and relationships"""
     
-    conn = psycopg2.connect(
-        dbname=DB_NAME,
-        user=DB_USER,
-        password=DB_PASSWORD,
-        host=DB_HOST,
-        port=DB_PORT
-    )
+    conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
     
     try:

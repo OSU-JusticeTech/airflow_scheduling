@@ -15,10 +15,15 @@ import psycopg2
 import requests
 import time
 from datetime import datetime
-from dotenv import load_dotenv
+from pathlib import Path
 
-# Add project root to path
-sys.path.append('/Users/dishapatel/airflow_scheduling')
+PROJECT_ROOT = Path(__file__).resolve().parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.append(str(PROJECT_ROOT))
+
+from config.runtime import CASES_FILE_DIRECTORY, DB_CONFIG, ensure_project_root_on_path
+
+ensure_project_root_on_path()
 
 XML_PARSER_AVAILABLE = False
 try:
@@ -29,43 +34,19 @@ try:
     print("XML parser loaded successfully (direct import)")
 except ImportError:
     try:
-        # alternative path
-        import sys
-        sys.path.insert(0, '/Users/dishapatel/airflow_scheduling/utils')
+        # Alternative: import directly from local utils folder.
+        sys.path.insert(0, str(PROJECT_ROOT / "utils"))
         from XML_parser import parse_case_html, make_case
         from pyschema import Case, SideAddress, Attorney
         XML_PARSER_AVAILABLE = True
         print("XML parser loaded successfully (alternative path)")
     except ImportError:
-        try:
-            # importing from current directory
-            import os
-            current_dir = os.path.dirname(os.path.abspath(__file__))
-            utils_path = os.path.join(current_dir, 'utils')
-            if utils_path not in sys.path:
-                sys.path.append(utils_path)
-            from XML_parser import parse_case_html, make_case
-            from pyschema import Case, SideAddress, Attorney
-            XML_PARSER_AVAILABLE = True
-            print("XML parser loaded successfully (utils path)")
-        except ImportError as e:
-            print(f"❌ Warning: XML parser not available - {e}")
-            XML_PARSER_AVAILABLE = False
-
-load_dotenv()
-
-# Configuration
-CASES_FILE_DIRECTORY = os.path.expanduser("~/JusticeTech/cases")
+        print("❌ Warning: XML parser not available")
+        XML_PARSER_AVAILABLE = False
 
 def get_database_connection():
     """Get database connection"""
-    return psycopg2.connect(
-        dbname=os.getenv('DB_NAME'),
-        user=os.getenv('DB_USER'),
-        password=os.getenv('DB_PASSWORD'),
-        host=os.getenv('DB_HOST'),
-        port=os.getenv('DB_PORT')
-    )
+    return psycopg2.connect(**DB_CONFIG)
 
 def find_new_html_files():
     """Find HTML files that haven't been processed yet"""

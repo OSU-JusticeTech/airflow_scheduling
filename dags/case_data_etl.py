@@ -1,10 +1,8 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from datetime import datetime, timedelta
-from dotenv import load_dotenv
 import psycopg2
 from bs4 import BeautifulSoup
-import os
 import sys
 import re
 import signal
@@ -12,8 +10,14 @@ import requests
 from pathlib import Path
 from requests.exceptions import Timeout, ConnectionError
 
-# add project root to Python path
-sys.path.append('/Users/yasashwininapa/Desktop/justicetech/airflow_project')
+# Ensure project root imports resolve in Airflow workers.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.append(str(PROJECT_ROOT))
+
+from config.runtime import CASES_FILE_DIRECTORY, DB_CONFIG, ensure_project_root_on_path
+
+ensure_project_root_on_path()
 
 try:
     from utils.XML_parser import parse_case_html, make_case
@@ -22,28 +26,11 @@ try:
 except ImportError:
     print("ERROR: Could not import XML parser - import failed at module load time")
     XML_PARSER_AVAILABLE = False
-<<<<<<< HEAD
 from utils.load_parsed_data import parse_and_insert_from_db
-=======
->>>>>>> origin/main
 
 BATCH_SIZE = 1000
 # under public schema now 
 TABLE_NAME = "raw_cases"
-
-load_dotenv()
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_NESTED_CASE_DIR = PROJECT_ROOT.parent / "cases"
-CASES_FILE_DIRECTORY = Path(
-    os.getenv("CASES_FILE_DIRECTORY", str(DEFAULT_NESTED_CASE_DIR))
-).expanduser()
-
-DB_PASSWORD = os.getenv("DB_PASSWORD")
-DB_USER = os.getenv("DB_USER")
-DB_HOST = os.getenv("DB_HOST")
-DB_PORT = os.getenv("DB_PORT")
-DB_NAME = os.getenv("DB_NAME")
 
 
 def batch_html_to_postgres():
@@ -67,13 +54,7 @@ def batch_html_to_postgres():
     if total_files == 0:
         return
     
-    conn = psycopg2.connect(
-        dbname=DB_NAME,
-        user=DB_USER,
-        password=DB_PASSWORD,
-        host=DB_HOST,
-        port=DB_PORT
-    )
+    conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
 
     new_files = 0
@@ -171,13 +152,7 @@ def extract_and_geocode_addresses():
         po_indicators = ['P.O. BOX', 'P.O BOX', 'PO BOX', 'POB', 'POBOX', 'P O BOX']
         return any(indicator in address_upper for indicator in po_indicators)
     
-    conn = psycopg2.connect(
-        dbname=DB_NAME,
-        user=DB_USER,
-        password=DB_PASSWORD,
-        host=DB_HOST,
-        port=DB_PORT
-    )
+    conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
     
     start_time = time.time()
@@ -428,32 +403,6 @@ def extract_and_geocode_addresses():
             conn.close()
             return
         
-<<<<<<< HEAD
-        # Geocoding is optional; skip when tracking table is not present.
-        cur.execute("SELECT to_regclass('public.geocoded_addresses')")
-        has_geocoded_addresses = cur.fetchone()[0] is not None
-        if not has_geocoded_addresses:
-            print("  Geocoding skipped: table geocoded_addresses does not exist in this schema")
-            addresses_to_geocode = []
-        else:
-            # Geocode only PARTY addresses
-            cur.execute("""
-                SELECT a.address_id, a.address_line1, a.city, a.state, a.postal_code,
-                       'party' as entity_type, '' as entity_name
-                FROM address a
-                JOIN party p ON a.address_id = p.address_id
-                WHERE a.address_id NOT IN (
-                    SELECT DISTINCT address_id 
-                    FROM geocoded_addresses 
-                    WHERE geocode_status IN ('success', 'timeout', 'failed', 'skipped_po_box')
-                    AND address_id IS NOT NULL
-                )
-                AND a.address_line1 IS NOT NULL
-                AND a.address_line1 != ''
-                ORDER BY a.address_id ASC
-                LIMIT 10
-            """)
-=======
         # Geocode only PARTY addresses
         cur.execute("""
             SELECT a.address_id, a.address_line1, a.city, a.state, a.postal_code,
@@ -471,9 +420,8 @@ def extract_and_geocode_addresses():
             ORDER BY a.created_at ASC
             LIMIT 25
         """)
->>>>>>> origin/main
         
-            addresses_to_geocode = cur.fetchall()
+        addresses_to_geocode = cur.fetchall()
         geocoded_count = 0
         
         if addresses_to_geocode:
@@ -845,7 +793,6 @@ def extract_addresses_simple(html_content, case_number):
     
     return addresses[:5] 
 
-<<<<<<< HEAD
 
 
 def parse_staged_html_to_models(**context):
@@ -854,8 +801,6 @@ def parse_staged_html_to_models(**context):
     task = context.get("task")
     task_id = task.task_id if task else None
     parse_and_insert_from_db(batch_size=BATCH_SIZE, dag_run_id=dag_run_id, task_id=task_id)
-=======
->>>>>>> origin/main
 
 with DAG(
     dag_id="batch_cases_to_postgres",
@@ -877,16 +822,12 @@ with DAG(
         task_id="batch_html_to_postgres",
         python_callable=batch_html_to_postgres
     )
-<<<<<<< HEAD
 
     task_parse_and_insert = PythonOperator(
         task_id="parse_html_to_models",
         python_callable=parse_staged_html_to_models,
     )
-
-=======
     
->>>>>>> origin/main
     task_extract_addresses = PythonOperator(
         task_id="extract_and_geocode_addresses", 
         python_callable=extract_and_geocode_addresses
