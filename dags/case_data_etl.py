@@ -135,10 +135,23 @@ def batch_html_to_postgres():
 def extract_and_geocode_addresses():
     """Extract new addresses AND geocode existing ones using CURA service"""
     import time
+    import gc  # For memory management
+    import os
+    
+    # FIX: macOS SIGSEGV from network proxy detection
+    # Set no_proxy to '*' to prevent Apple system library calls during requests
+    if 'no_proxy' not in os.environ:
+        os.environ['no_proxy'] = '*'
     
     def timeout_handler(signum, frame):
         """Signal handler for geocoding timeout"""
         raise TimeoutError("CURA geocoding request timeout (10 seconds)")
+    
+    def geocode_with_timeout(geo_service, address_payload, timeout_seconds=10):
+        """Call geocode_address with a hard timeout using requests timeout"""
+        # requests.get() timeout parameter is much safer than threading
+        # It uses socket timeouts at the OS level without spawning threads
+        return geo_service.geocode_address(address_payload, timeout=timeout_seconds)
     
     def is_po_box_address(address_line1):
         """Check if address is a P.O. Box (these don't geocode well)"""
@@ -161,7 +174,8 @@ def extract_and_geocode_addresses():
     start_time = time.time()
     max_runtime = 4 * 60
     extraction_time_limit = 60
-    geocoding_time_limit = 3 * 60  # Increased from 2.5 to 3 minutes for more geocoding  
+    geocoding_time_limit = 2 * 60  # 2 minutes max for geocoding phase
+    max_time_per_address = 10  # 10 seconds max per address geocoding request  
     
     # First, get the total count of unprocessed cases
     cur.execute("""
@@ -370,12 +384,11 @@ def extract_and_geocode_addresses():
     if time.time() - start_time < geocoding_time_limit:
         print("  PHASE 2: Geocoding addresses...")
         
-        # Initialize CURA geocoding service
+        # Import geolocation service once
         try:
             from utils.geolocation import create_geolocation_service
-            geo_service = create_geolocation_service()
         except Exception as e:
-            print(f"Failed to initialize CURA geocoding service: {e}")
+            print(f"Failed to import geolocation service: {e}")
             cur.close()
             conn.close()
             return
@@ -399,21 +412,26 @@ def extract_and_geocode_addresses():
         """)
         
         addresses_to_geocode = cur.fetchall()
+        total_addresses = len(addresses_to_geocode)
         geocoded_count = 0
         
         if addresses_to_geocode:
-            print(f"Geocoding {len(addresses_to_geocode)} party addresses...")
-            print(f"  CURA BATCH STARTED: {len(addresses_to_geocode)} addresses queued for geocoding")
+            print(f"Geocoding {total_addresses} party addresses...")
+            print(f"  CURA BATCH STARTED: {total_addresses} addresses queued for geocoding")
             
-            # Geocode each address individually
-            for i, (address_id, address_line1, city, state, postal_code, entity_type, entity_name, created_at) in enumerate(addresses_to_geocode):
-                # Check time limits
-                if time.time() - start_time > max_runtime or time.time() - start_time > geocoding_time_limit:
-                    print(f"  Time limit reached, stopping")
+            # Create ONE service instance for the entire batch (enables caching within batch)
+            geo_service = create_geolocation_service()
+            
+            # Geocode each address individually (process one at a time to manage memory)
+            for i, (address_id, address_line1, city, state, postal_code, entity_type, entity_name, created_at) in enumerate(addresses_to_geocode, 1):
+                # Check time limits BEFORE processing
+                elapsed_total = time.time() - start_time
+                if elapsed_total > max_runtime:
+                    print(f"  Hard limit reached (total runtime {elapsed_total:.1f}s), stopping geocoding")
                     break
                 
-                if time.time() - start_time > (max_runtime * 0.8):
-                    print(f"  Approaching max runtime, stopping")
+                if elapsed_total > geocoding_time_limit:
+                    print(f"  Geocoding time limit reached ({elapsed_total:.1f}s), stopping")
                     break
                 
                 # Verify party-address relationship
@@ -432,7 +450,7 @@ def extract_and_geocode_addresses():
                         pass
                     continue
                 
-                print(f"\n  [{i+1}/{len(addresses_to_geocode)}] {entity_name}: {address_line1}")
+                print(f"\n  [{i}/{total_addresses}] {entity_name}: {address_line1}")
                 
                 try:
                     address_start = time.time()
@@ -447,9 +465,11 @@ def extract_and_geocode_addresses():
                     print(f"         CURA REQUEST SENT (Address ID {address_id}):")
                     print(f"           {request_payload}")
 
+                    result = None
                     try:
-                        # Use timeout on the geocoding call directly
-                        result = geo_service.geocode_address(request_payload, timeout=5)
+                        
+                        # Use timeout wrapper to enforce hard limit on CURA geocoding
+                        result = geocode_with_timeout(geo_service, request_payload, timeout_seconds=10)
                     except (Timeout, ConnectionError, TimeoutError) as te:
                         geocode_time = time.time() - address_start
                         print(f"        CURA RESPONSE (TIMEOUT after {geocode_time:.2f}s)")
@@ -458,25 +478,38 @@ def extract_and_geocode_addresses():
                             conn.commit()
                         except:
                             pass
+                        result = None
+                        continue
+                    except Exception as nested_e:
+                        geocode_time = time.time() - address_start
+                        print(f"      ❌ CURA ERROR ({geocode_time:.2f}s): {type(nested_e).__name__}: {nested_e}")
+                        try:
+                            cur.execute("INSERT INTO geocoded_addresses (address_id, geocode_status, geocoded_at, geocode_service) VALUES (%s, %s, NOW(), %s) ON CONFLICT (address_id) DO UPDATE SET geocode_status = EXCLUDED.geocode_status", (address_id, 'error', 'CURA'))
+                            conn.commit()
+                        except:
+                            pass
+                        result = None
                         continue
                     
                     geocode_time = time.time() - address_start
                     
                     # Log CURA response
-                    if result['status'] == 'success':
+                    if result and result['status'] == 'success':
                         lat = result.get('latitude', 'N/A')
                         lng = result.get('longitude', 'N/A')
                         print(f"        CURA RESPONSE SUCCESS ({geocode_time:.2f}s): Lat={lat}, Lng={lng}")
                         cur.execute("INSERT INTO geocoded_addresses (address_id, latitude, longitude, geocode_status, geocoded_at, geocode_service) VALUES (%s, %s, %s, %s, NOW(), %s) ON CONFLICT (address_id) DO UPDATE SET latitude = EXCLUDED.latitude, longitude = EXCLUDED.longitude, geocode_status = EXCLUDED.geocode_status", (address_id, result['latitude'], result['longitude'], 'success', 'CURA'))
                         geocoded_count += 1
                         print(f"        SUCCESS - Stored in database")
-                    else:
+                    elif result:
                         status = result.get('status', 'unknown')
                         failed_status = 'failed' if status != 'success' else status
                         print(f"        CURA RESPONSE ({geocode_time:.2f}s): Status={status}")
                         cur.execute("INSERT INTO geocoded_addresses (address_id, geocode_status, geocoded_at, geocode_service) VALUES (%s, %s, NOW(), %s) ON CONFLICT (address_id) DO UPDATE SET geocode_status = EXCLUDED.geocode_status", (address_id, failed_status, 'CURA'))
                     
                     conn.commit()
+                    # Explicitly clear result from memory
+                    result = None
                     time.sleep(0.1)
                         
                 except Exception as e:
@@ -487,8 +520,13 @@ def extract_and_geocode_addresses():
                         conn.commit()
                     except:
                         pass
+                
+                # Periodically clear Python's memory cache
+                if i % 5 == 0:
+                    import gc
+                    gc.collect()
             
-            print(f"  PHASE 2 COMPLETE: {geocoded_count} addresses geocoded")
+            print(f"  PHASE 2 COMPLETE: {geocoded_count} addresses geocoded successfully")
         else:
             print("  No party addresses ready for geocoding")
     else:
@@ -773,9 +811,9 @@ with DAG(
     description="Process HTML case files and geocode addresses with timeout protection",
     tags=["etl", "cases", "geocoding", "extraction"],
     max_active_runs=1,  # prevent overlapping runs
-    dagrun_timeout=timedelta(minutes=10),  # kill entire DAG task run after 10 minutes
+    dagrun_timeout=timedelta(minutes=60),  # allow up to 60 minutes for entire DAG run
     default_args={
-        'execution_timeout': timedelta(minutes=8),  # 8-minute timeout per task
+        'execution_timeout': timedelta(minutes=45),  # 45-minute timeout per task (sufficient for batch processing + geocoding)
         'retries': 0,  # no retries to prevent overlap
         'retry_delay': timedelta(minutes=5),
     }

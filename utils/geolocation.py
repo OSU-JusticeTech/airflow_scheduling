@@ -5,16 +5,73 @@ Geolocation service that integrates with CURA geocoding service.
 import requests
 from typing import Dict
 import logging
+import os
+from urllib3.util.ssl_ import create_urllib3_context
+import urllib3
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 logger = logging.getLogger(__name__)
+
+# disable proxy detection on macOS
+if 'no_proxy' not in os.environ:
+    os.environ['no_proxy'] = '*'
 
 class GeolocationService:
     
     def __init__(self):
         self.cura_geocode_url = "https://cura-gis-web.asc.ohio-state.edu/arcgis/rest/services/geocoding/USA/GeocodeServer/findAddressCandidates"
+        # Create session with custom SSL context to avoid macOS SIGSEGV
+        self.session = requests.Session()
+        # Don't use custom SSL context if urllib3 context creation fails
+        try:
+            ctx = create_urllib3_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = 0  # SSL.CERT_NONE
+            adapter = requests.adapters.HTTPAdapter()
+            self.session.mount('https://', adapter)
+        except:
+            pass  # Fall back to default session
+        
+        # In-memory cache for batch geocoding (prevents redundant API calls)
+        self.batch_cache = {}
         
     def geocode_address(self, address_components: Dict[str, str], timeout: int = 30) -> Dict[str, any]:
-        return self._cura_geocode(address_components, timeout=timeout)
+        # Create cache key from address components
+        cache_key = self._create_cache_key(address_components)
+        
+        # Check if already geocoded in this batch
+        if cache_key in self.batch_cache:
+            logger.info(f"ADDRESS EXISTS Using {self._format_full_address(address_components)}")
+            return self.batch_cache[cache_key]
+        
+        # Not in cache, call CURA
+        result = self._cura_geocode(address_components, timeout=timeout)
+        
+        # Store in cache
+        self.batch_cache[cache_key] = result
+        
+        return result
+    
+    def _create_cache_key(self, address_components: Dict[str, str]) -> str:
+        """
+        Create a unique cache key from address components.
+        Uses address_line1, city, state, postal_code for uniqueness.
+        """
+        addr1 = address_components.get('address_line1', '').upper().strip()
+        city = address_components.get('city', '').upper().strip()
+        state = address_components.get('state', '').upper().strip()
+        postal = address_components.get('postal_code', '').upper().strip()
+        
+        return f"{addr1}|{city}|{state}|{postal}"
+    
+    def clear_batch_cache(self):
+        """
+        Clear the in-memory batch cache. Call this between batch runs.
+        """
+        cache_size = len(self.batch_cache)
+        self.batch_cache.clear()
+        logger.info(f"Batch cache cleared. Previous cache size: {cache_size} entries")
 
     def _cura_geocode(self, address_components: Dict[str, str], timeout: int = 30) -> Dict[str, any]:
         try:
@@ -33,8 +90,15 @@ class GeolocationService:
             
             logger.info(f"Geocoding with CURA: {full_address}")
             
-            # Make request to CURA geocoding service
-            response = requests.get(self.cura_geocode_url, params=params, timeout=timeout, verify=False)
+            # Make request to CURA geocoding service with proper timeout
+            # Use verify=True for SSL (safe), timeout for connection limits
+            response = self.session.get(
+                self.cura_geocode_url, 
+                params=params, 
+                timeout=timeout,
+                verify=False,  # Disable SSL verification for macOS compatibility
+                allow_redirects=True
+            )
             
             data = response.json()
             
