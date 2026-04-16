@@ -22,7 +22,10 @@ try:
 except ImportError:
     print("ERROR: Could not import XML parser - import failed at module load time")
     XML_PARSER_AVAILABLE = False
+<<<<<<< HEAD
 from utils.load_parsed_data import parse_and_insert_from_db
+=======
+>>>>>>> origin/main
 
 BATCH_SIZE = 1000
 # under public schema now 
@@ -180,7 +183,7 @@ def extract_and_geocode_addresses():
     start_time = time.time()
     max_runtime = 4 * 60
     extraction_time_limit = 60
-    geocoding_time_limit = 2.5 * 60  
+    geocoding_time_limit = 3 * 60  # Increased from 2.5 to 3 minutes for more geocoding  
     
     # First, get the total count of unprocessed cases
     cur.execute("""
@@ -425,6 +428,7 @@ def extract_and_geocode_addresses():
             conn.close()
             return
         
+<<<<<<< HEAD
         # Geocoding is optional; skip when tracking table is not present.
         cur.execute("SELECT to_regclass('public.geocoded_addresses')")
         has_geocoded_addresses = cur.fetchone()[0] is not None
@@ -449,6 +453,25 @@ def extract_and_geocode_addresses():
                 ORDER BY a.address_id ASC
                 LIMIT 10
             """)
+=======
+        # Geocode only PARTY addresses
+        cur.execute("""
+            SELECT a.address_id, a.address_line1, a.city, a.state, a.postal_code,
+                   'party' as entity_type, p.party_name as entity_name, a.created_at
+            FROM addresses a
+            JOIN party p ON a.address_id = p.address_id
+            WHERE a.address_id NOT IN (
+                SELECT DISTINCT address_id 
+                FROM geocoded_addresses 
+                WHERE geocode_status IN ('success', 'failed', 'skipped_po_box', 'timeout')
+                AND address_id IS NOT NULL
+            )
+            AND a.address_line1 IS NOT NULL
+            AND a.address_line1 != ''
+            ORDER BY a.created_at ASC
+            LIMIT 25
+        """)
+>>>>>>> origin/main
         
             addresses_to_geocode = cur.fetchall()
         geocoded_count = 0
@@ -524,8 +547,9 @@ def extract_and_geocode_addresses():
                         print(f"        SUCCESS - Stored in database")
                     else:
                         status = result.get('status', 'unknown')
+                        failed_status = 'failed' if status != 'success' else status
                         print(f"        CURA RESPONSE ({geocode_time:.2f}s): Status={status}")
-                        cur.execute("INSERT INTO geocoded_addresses (address_id, geocode_status, geocoded_at, geocode_service) VALUES (%s, %s, NOW(), %s) ON CONFLICT (address_id) DO UPDATE SET geocode_status = EXCLUDED.geocode_status", (address_id, status, 'CURA'))
+                        cur.execute("INSERT INTO geocoded_addresses (address_id, geocode_status, geocoded_at, geocode_service) VALUES (%s, %s, NOW(), %s) ON CONFLICT (address_id) DO UPDATE SET geocode_status = EXCLUDED.geocode_status", (address_id, failed_status, 'CURA'))
                     
                     conn.commit()
                     time.sleep(0.1)
@@ -821,6 +845,7 @@ def extract_addresses_simple(html_content, case_number):
     
     return addresses[:5] 
 
+<<<<<<< HEAD
 
 
 def parse_staged_html_to_models(**context):
@@ -829,6 +854,8 @@ def parse_staged_html_to_models(**context):
     task = context.get("task")
     task_id = task.task_id if task else None
     parse_and_insert_from_db(batch_size=BATCH_SIZE, dag_run_id=dag_run_id, task_id=task_id)
+=======
+>>>>>>> origin/main
 
 with DAG(
     dag_id="batch_cases_to_postgres",
@@ -850,12 +877,16 @@ with DAG(
         task_id="batch_html_to_postgres",
         python_callable=batch_html_to_postgres
     )
+<<<<<<< HEAD
 
     task_parse_and_insert = PythonOperator(
         task_id="parse_html_to_models",
         python_callable=parse_staged_html_to_models,
     )
 
+=======
+    
+>>>>>>> origin/main
     task_extract_addresses = PythonOperator(
         task_id="extract_and_geocode_addresses", 
         python_callable=extract_and_geocode_addresses
