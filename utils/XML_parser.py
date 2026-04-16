@@ -3,6 +3,7 @@ import datetime
 from pprint import pprint
 from collections import defaultdict
 import json
+import re
 
 import glob
 from tqdm import tqdm
@@ -179,13 +180,25 @@ def parse_case_html(html_content):
     # Parse HTML with BeautifulSoup
     soup = BeautifulSoup(html_content, 'html.parser')
 
-    # Extract plaintiff and defendant from the first <td> tag
+    page_headers = soup.find_all('td', class_='page_header')
+    if not page_headers:
+        raise ValueError("missing page_header cells")
 
-    # Extract case number, status, and filed date from the second <td> tag
-    case_info = soup.find_all('td', class_='page_header')[1].text.strip()
-    case_no = case_info.split("Case No.")[1].split("\n")[0].strip()
-    status = case_info.split("Status:")[1].split("\n")[0].strip()
-    filed_date = case_info.split("Filed:")[1].strip()
+    # Some pages have one header cell, others have multiple.
+    case_info = "\n".join(h.get_text("\n", strip=True) for h in page_headers)
+
+    case_no_match = re.search(r"Case\s*No\.\s*([^\n]+)", case_info)
+    status_match = re.search(r"Status:\s*([^\n]+)", case_info)
+    filed_match = re.search(r"Filed:\s*([0-9]{2}/[0-9]{2}/[0-9]{4})", case_info)
+
+    if not case_no_match:
+        raise ValueError("missing case number in page header")
+    if not filed_match:
+        raise ValueError("missing filed date in page header")
+
+    case_no = case_no_match.group(1).strip()
+    status = status_match.group(1).strip() if status_match else "Unknown"
+    filed_date = filed_match.group(1).strip()
 
     # Parse and format the Filed Date into MM/DD/YYYY format
     filed_date_obj = datetime.datetime.strptime(filed_date, "%m/%d/%Y")
@@ -202,7 +215,7 @@ def parse_case_html(html_content):
     parties = []
 
     # Iterate through each row in the table
-    rows = table.find_all('tr')
+    rows = table.find_all('tr') if table is not None else []
     current_party = None
 
     for row in rows:
@@ -237,7 +250,6 @@ def parse_case_html(html_content):
         rows = table.find_all('tr')
 
         current_attorney = None
-        assert len(rows) % 2 == 0
         for rid, row in enumerate(rows):
             cells = row.find_all('td')
             if rid % 2 == 0 and current_attorney is not None:
@@ -308,8 +320,11 @@ def parse_case_html(html_content):
         for row in table.find_all('tr')[1:]:  # Skip the first row which contains the headers
             cells = row.find_all('td')
             if row.get('class') == ["dkt_text"]:
-                current_entry["extra"] = cells[1].decode_contents()
+                if current_entry is not None and len(cells) > 1:
+                    current_entry["extra"] = cells[1].decode_contents()
             else:
+                if len(cells) < 4:
+                    continue
                 if current_entry is not None:
                     docket.append(current_entry)
                 current_entry = {"Date": datetime.datetime.strptime(cells[0].get_text(strip=True), "%m/%d/%Y"),

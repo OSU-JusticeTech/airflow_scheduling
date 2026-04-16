@@ -9,6 +9,7 @@ import sys
 import re
 import signal
 import requests
+from pathlib import Path
 from requests.exceptions import Timeout, ConnectionError
 
 # add project root to Python path
@@ -23,13 +24,17 @@ except ImportError:
     XML_PARSER_AVAILABLE = False
 from utils.load_parsed_data import parse_and_insert_from_db
 
-# change this to your local path where HTML files are stored -- and consider moving it to .env variables
-CASES_FILE_DIRECTORY = os.path.expanduser("~/JusticeTech/cases")
 BATCH_SIZE = 1000
 # under public schema now 
 TABLE_NAME = "raw_cases"
 
 load_dotenv()
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_NESTED_CASE_DIR = PROJECT_ROOT.parent / "cases"
+CASES_FILE_DIRECTORY = Path(
+    os.getenv("CASES_FILE_DIRECTORY", str(DEFAULT_NESTED_CASE_DIR))
+).expanduser()
 
 DB_PASSWORD = os.getenv("DB_PASSWORD")
 DB_USER = os.getenv("DB_USER")
@@ -40,7 +45,24 @@ DB_NAME = os.getenv("DB_NAME")
 
 def batch_html_to_postgres():
     """Load HTML files to postgres and detect changes for re-processing"""
-    import hashlib
+    if not CASES_FILE_DIRECTORY.exists():
+        print(f"HTML source directory does not exist: {CASES_FILE_DIRECTORY}")
+        return
+
+    # Support both legacy flat folders and nested case folders.
+    # Prefer printable.html from each case folder when available.
+    nested_preferred = sorted(CASES_FILE_DIRECTORY.glob("*/printable.html"))
+    if nested_preferred:
+        html_files = nested_preferred
+    else:
+        flat_html_files = sorted(CASES_FILE_DIRECTORY.glob("*.html"))
+        html_files = flat_html_files if flat_html_files else sorted(CASES_FILE_DIRECTORY.rglob("*.html"))
+
+    total_files = len(html_files)
+    print(f"Found {total_files} HTML files in {CASES_FILE_DIRECTORY}.")
+
+    if total_files == 0:
+        return
     
     conn = psycopg2.connect(
         dbname=DB_NAME,
@@ -51,11 +73,6 @@ def batch_html_to_postgres():
     )
     cur = conn.cursor()
 
-    # find all HTML files in the directory
-    html_files = [f for f in os.listdir(CASES_FILE_DIRECTORY) if f.endswith(".html")]
-    total_files = len(html_files)
-    print(f"Found {total_files} HTML files.")
-    
     new_files = 0
     updated_files = 0
     unchanged_files = 0
@@ -66,19 +83,19 @@ def batch_html_to_postgres():
         records_to_insert = []
         records_to_update = []
 
-        for file_name in batch:
-            file_path = os.path.join(CASES_FILE_DIRECTORY, file_name)
+        for file_path in batch:
             try:
                 with open(file_path, "r", encoding="utf-8") as f:
                     content = f.read()
-                    case_number = file_name.replace('.html', '')
-                    
-                    # create content hash for change detection
-                    content_hash = hashlib.md5(content.encode('utf-8')).hexdigest()
+
+                    if file_path.stem in {"printable", "overview", "journal"}:
+                        case_number = file_path.parent.name
+                    else:
+                        case_number = file_path.stem
                     
                     # check if case already exists and if content has changed
                     cur.execute("""
-                        SELECT raw_html, content_hash 
+                        SELECT raw_html
                         FROM raw_cases 
                         WHERE case_number = %s
                     """, (case_number,))
@@ -86,40 +103,37 @@ def batch_html_to_postgres():
                     existing_record = cur.fetchone()
                     
                     if existing_record is None:
-                        records_to_insert.append((case_number, content, content_hash))
+                        records_to_insert.append((case_number, content))
                         new_files += 1
                         
-                    elif existing_record[1] != content_hash:
-                        records_to_update.append((content, content_hash, case_number))
+                    elif existing_record[0] != content:
+                        records_to_update.append((content, case_number))
                         updated_files += 1
-                        
-                        cur.execute("""
-                            DELETE FROM address WHERE case_number = %s
-                        """, (case_number,))
                         
                     else:
                         unchanged_files += 1
                         
             except Exception as e:
-                print(f"Error processing {file_name}: {e}")
+                conn.rollback()
+                print(f"Error processing {file_path}: {e}")
 
         # bulk insert new records
         if records_to_insert:
             cur.executemany("""
-                INSERT INTO raw_cases (case_number, raw_html, content_hash, last_updated)
-                VALUES (%s, %s, %s, NOW())
+                INSERT INTO raw_cases (case_number, raw_html, ingested_at)
+                VALUES (%s, %s, NOW())
             """, records_to_insert)
             
         # bulk update changed records
         if records_to_update:
             cur.executemany("""
                 UPDATE raw_cases 
-                SET raw_html = %s, content_hash = %s, last_updated = NOW()
+                SET raw_html = %s, ingested_at = NOW()
                 WHERE case_number = %s
             """, records_to_update)
 
         conn.commit()
-        print(f"📊 Batch {i // BATCH_SIZE + 1} processed: {len(records_to_insert)} new, {len(records_to_update)} updated")
+        print(f"Batch {i // BATCH_SIZE + 1} processed: {len(records_to_insert)} new, {len(records_to_update)} updated")
 
     # Final summary
     print(f"\n  HTML PROCESSING COMPLETE:")
@@ -136,6 +150,10 @@ def batch_html_to_postgres():
 def extract_and_geocode_addresses():
     """Extract new addresses AND geocode existing ones using CURA service"""
     import time
+
+    def _next_id(cursor, table_name, id_column):
+        cursor.execute(f"SELECT COALESCE(MAX({id_column}), 0) + 1 FROM {table_name}")
+        return cursor.fetchone()[0]
     
     def timeout_handler(signum, frame):
         """Signal handler for geocoding timeout"""
@@ -175,11 +193,11 @@ def extract_and_geocode_addresses():
     """)
     
     total_unprocessed = cur.fetchone()[0]
-    print(f"📊 PROCESSING STATUS: {total_unprocessed} cases remaining to process")
+    print(f"PROCESSING STATUS: {total_unprocessed} cases remaining to process")
     
     # PHASE 1: Extract addresses, parties, and attorneys from new cases
     if total_unprocessed > 0:
-        print("🔧 PHASE 1: Extracting data from new cases...")
+        print("PHASE 1: Extracting data from new cases...")
         
         # extract new addresses from unprocessed cases
         cur.execute("""
@@ -197,6 +215,7 @@ def extract_and_geocode_addresses():
         total_extracted = 0
         total_parties = 0
         total_attorneys = 0
+        failed_cases = []
         
         for case_number, raw_html in unprocessed_cases:
             if time.time() - start_time > extraction_time_limit:  
@@ -215,11 +234,12 @@ def extract_and_geocode_addresses():
                     
                     case_result = cur.fetchone()
                     if not case_result:
+                        next_case_id = _next_id(cur, "cases", "case_id")
                         cur.execute("""
-                            INSERT INTO cases (case_number, case_title, pipeline_status)
-                            VALUES (%s, %s, %s) RETURNING case_id
-                        """, (case_number, case_data.get('case_title', f"Case {case_number}"), 'processing'))
-                        case_id = cur.fetchone()[0]
+                            INSERT INTO cases (case_id, case_number, case_title, case_status)
+                            VALUES (%s, %s, %s, %s)
+                        """, (next_case_id, case_number, case_data.get('case_title', f"Case {case_number}"), 'processing'))
+                        case_id = next_case_id
                     else:
                         case_id = case_result[0]
                     
@@ -232,7 +252,7 @@ def extract_and_geocode_addresses():
                         
                         # Check if address already exists
                         cur.execute("""
-                            SELECT address_id FROM addresses 
+                            SELECT address_id FROM address 
                             WHERE address_line1 = %s AND city = %s AND state = %s AND postal_code = %s
                             LIMIT 1
                         """, (address_line1, city, state, postal_code))
@@ -243,11 +263,14 @@ def extract_and_geocode_addresses():
                             print(f"        Using existing address ID {address_id}: {address_line1}")
                         else:
                             # Insert new address
+                            next_address_id = _next_id(cur, "address", "address_id")
                             cur.execute("""
-                                INSERT INTO addresses (address_line1, address_line2, city, state, 
-                                                     country, postal_code, created_at)
-                                VALUES (%s, %s, %s, %s, %s, %s, NOW()) RETURNING address_id
+                                INSERT INTO address (address_id, address_type, address_line1, address_line2, city, state, 
+                                                     country, postal_code)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                             """, (
+                                next_address_id,
+                                addr_data.get('entity_type'),
                                 address_line1,
                                 addr_data.get('address_line2', ''),
                                 city,
@@ -255,7 +278,7 @@ def extract_and_geocode_addresses():
                                 addr_data.get('country', 'USA'),
                                 postal_code
                             ))
-                            address_id = cur.fetchone()[0]
+                            address_id = next_address_id
                             print(f"        Created new address ID {address_id}: {address_line1}")
                             total_extracted += 1
                         
@@ -277,9 +300,9 @@ def extract_and_geocode_addresses():
                         
                         cur.execute("""
                             SELECT party_id FROM party 
-                            WHERE case_id = %s AND party_name = %s AND address_id = %s
+                            WHERE party_type = %s AND address_id IS NOT DISTINCT FROM %s
                             LIMIT 1
-                        """, (case_id, party_name, party_address_id))
+                        """, (party_type, party_address_id))
                         
                         existing_party = cur.fetchone()
                         if existing_party:
@@ -287,13 +310,26 @@ def extract_and_geocode_addresses():
                             print(f"         Reusing existing party: {party_name} (ID {party_id})")
                         else:
                             # Insert new party
+                            next_party_id = _next_id(cur, "party", "party_id")
                             cur.execute("""
-                                INSERT INTO party (case_id, party_name, party_type, address_id)
-                                VALUES (%s, %s, %s, %s) RETURNING party_id
-                            """, (case_id, party_name, party_type, party_address_id))
-                            party_id = cur.fetchone()[0]
+                                INSERT INTO party (party_id, party_type, address_id, created)
+                                VALUES (%s, %s, %s, %s)
+                            """, (next_party_id, party_type, party_address_id, datetime.now()))
+                            party_id = next_party_id
                             total_parties += 1
                             print(f"        Created new party: {party_name} (ID {party_id})")
+
+                        # Ensure party is linked to case through association table.
+                        cur.execute("""
+                            SELECT 1 FROM case_party
+                            WHERE case_id = %s AND party_id = %s
+                            LIMIT 1
+                        """, (case_id, party_id))
+                        if not cur.fetchone():
+                            cur.execute("""
+                                INSERT INTO case_party (case_id, party_id)
+                                VALUES (%s, %s)
+                            """, (case_id, party_id))
                     
                     # Insert attorneys using normalized structure (with duplicate check)
                     for attorney_data in case_data.get('attorneys', []):
@@ -309,61 +345,69 @@ def extract_and_geocode_addresses():
                                 break
                         
                         # STEP 1: Insert/find attorney as ENTITY (person) - normalized system without case_id
-                        if attorney_address_id:
-                            cur.execute("""
-                                SELECT attorney_id FROM attorneys 
-                                WHERE attorney_name = %s AND address_id = %s
-                                LIMIT 1
-                            """, (attorney_name, attorney_address_id))
-                        else:
-                            cur.execute("""
-                                SELECT attorney_id FROM attorneys 
-                                WHERE attorney_name = %s AND address_id IS NULL
-                                LIMIT 1
-                            """, (attorney_name,))
+                        cur.execute("""
+                            SELECT attorney_id FROM attorney
+                            WHERE attorney_type = %s
+                              AND address_id IS NOT DISTINCT FROM %s
+                            LIMIT 1
+                        """, (attorney_type, attorney_address_id))
                         
                         existing_attorney_entity = cur.fetchone()
                         if existing_attorney_entity:
                             attorney_entity_id = existing_attorney_entity[0]
                             print(f"         Reusing attorney entity: {attorney_name} (ID {attorney_entity_id})")
                         else:
-                            # Insert new attorney ENTITY using normalized system
+                            # Insert new attorney row compatible with current schema.
+                            next_attorney_id = _next_id(cur, "attorney", "attorney_id")
                             cur.execute("""
-                                INSERT INTO attorneys (attorney_name, address_id, created)
-                                VALUES (%s, %s, %s) RETURNING attorney_id
-                            """, (attorney_name, attorney_address_id, datetime.now()))
-                            attorney_entity_id = cur.fetchone()[0]
+                                INSERT INTO attorney (attorney_id, party_id, attorney_type, address_id, created)
+                                VALUES (%s, %s, %s, %s, %s)
+                            """, (next_attorney_id, None, attorney_type, attorney_address_id, datetime.now()))
+                            attorney_entity_id = next_attorney_id
                             total_attorneys += 1
                             print(f"        Created new attorney entity: {attorney_name} (ID {attorney_entity_id})")
-                        
-                        # STEP 2: Create attorney-case RELATIONSHIP
-                        cur.execute("""
-                            SELECT case_attorney_id FROM case_attorneys 
-                            WHERE case_id = %s AND attorney_id = %s AND attorney_type = %s
-                            LIMIT 1
-                        """, (case_id, attorney_entity_id, attorney_type))
-                        
-                        existing_relationship = cur.fetchone()
-                        if existing_relationship:
-                            print(f"        Relationship already exists: Case {case_id} ↔ Attorney {attorney_entity_id} ({attorney_type})")
-                        else:
-                            # Insert new case-attorney relationship
-                            cur.execute("""
-                                INSERT INTO case_attorneys (case_id, attorney_id, attorney_type, created)
-                                VALUES (%s, %s, %s, %s) RETURNING case_attorney_id
-                            """, (case_id, attorney_entity_id, attorney_type, datetime.now()))
-                            case_attorney_id = cur.fetchone()[0]
-                            print(f"      🔗 Created relationship: Case {case_id} ↔ Attorney {attorney_entity_id} ({attorney_type})")
                 
             except Exception as e:
-                # Log error, close DB, and re-raise so Airflow task fails
-                print(f"❌ ERROR processing case {case_number}: {e}")
-                cur.close()
-                conn.close()
-                raise
+                # Skip malformed or parser-failing cases; continue with remaining work.
+                conn.rollback()
+                failed_cases.append((case_number, str(e)))
+                try:
+                    cur.execute("""
+                        SELECT case_id
+                        FROM cases
+                        WHERE case_number = %s
+                        LIMIT 1
+                    """, (case_number,))
+                    existing_case = cur.fetchone()
+
+                    if existing_case:
+                        cur.execute("""
+                            UPDATE cases
+                            SET case_status = %s,
+                                case_title = COALESCE(case_title, %s)
+                            WHERE case_number = %s
+                        """, ('parse_failed', f"Case {case_number}", case_number))
+                    else:
+                        next_case_id = _next_id(cur, "cases", "case_id")
+                        cur.execute("""
+                            INSERT INTO cases (case_id, case_number, case_title, case_status)
+                            VALUES (%s, %s, %s, %s)
+                        """, (next_case_id, case_number, f"Case {case_number}", 'parse_failed'))
+
+                    conn.commit()
+                except Exception as quarantine_error:
+                    conn.rollback()
+                    print(f"ERROR recording parse failure for {case_number}: {quarantine_error}")
+                print(f"ERROR processing case {case_number}: {e}")
+                continue
         
         conn.commit()
         print(f"  PHASE 1 COMPLETE: {total_extracted} new addresses, {total_parties} new parties, {total_attorneys} new attorneys")
+        if failed_cases:
+            print(f"  Skipped {len(failed_cases)} case(s) due to parser/format errors")
+            print("  Marked skipped cases with case_status=parse_failed")
+            for failed_case_number, failed_reason in failed_cases[:5]:
+                print(f"    - {failed_case_number}: {failed_reason}")
     else:
         print("  No new cases to process")
     
@@ -381,25 +425,32 @@ def extract_and_geocode_addresses():
             conn.close()
             return
         
-        # Geocode only PARTY addresses
-        cur.execute("""
-            SELECT a.address_id, a.address_line1, a.city, a.state, a.postal_code,
-                   'party' as entity_type, p.party_name as entity_name, a.created_at
-            FROM addresses a
-            JOIN party p ON a.address_id = p.address_id
-            WHERE a.address_id NOT IN (
-                SELECT DISTINCT address_id 
-                FROM geocoded_addresses 
-                WHERE geocode_status IN ('success', 'timeout', 'failed', 'skipped_po_box')
-                AND address_id IS NOT NULL
-            )
-            AND a.address_line1 IS NOT NULL
-            AND a.address_line1 != ''
-            ORDER BY a.created_at ASC
-            LIMIT 10
-        """)
+        # Geocoding is optional; skip when tracking table is not present.
+        cur.execute("SELECT to_regclass('public.geocoded_addresses')")
+        has_geocoded_addresses = cur.fetchone()[0] is not None
+        if not has_geocoded_addresses:
+            print("  Geocoding skipped: table geocoded_addresses does not exist in this schema")
+            addresses_to_geocode = []
+        else:
+            # Geocode only PARTY addresses
+            cur.execute("""
+                SELECT a.address_id, a.address_line1, a.city, a.state, a.postal_code,
+                       'party' as entity_type, '' as entity_name
+                FROM address a
+                JOIN party p ON a.address_id = p.address_id
+                WHERE a.address_id NOT IN (
+                    SELECT DISTINCT address_id 
+                    FROM geocoded_addresses 
+                    WHERE geocode_status IN ('success', 'timeout', 'failed', 'skipped_po_box')
+                    AND address_id IS NOT NULL
+                )
+                AND a.address_line1 IS NOT NULL
+                AND a.address_line1 != ''
+                ORDER BY a.address_id ASC
+                LIMIT 10
+            """)
         
-        addresses_to_geocode = cur.fetchall()
+            addresses_to_geocode = cur.fetchall()
         geocoded_count = 0
         
         if addresses_to_geocode:
@@ -407,7 +458,7 @@ def extract_and_geocode_addresses():
             print(f"  CURA BATCH STARTED: {len(addresses_to_geocode)} addresses queued for geocoding")
             
             # Geocode each address individually
-            for i, (address_id, address_line1, city, state, postal_code, entity_type, entity_name, created_at) in enumerate(addresses_to_geocode):
+            for i, (address_id, address_line1, city, state, postal_code, entity_type, entity_name) in enumerate(addresses_to_geocode):
                 # Check time limits
                 if time.time() - start_time > max_runtime or time.time() - start_time > geocoding_time_limit:
                     print(f"  Time limit reached, stopping")
@@ -481,7 +532,7 @@ def extract_and_geocode_addresses():
                         
                 except Exception as e:
                     geocode_time = time.time() - address_start
-                    print(f"      ❌ ERROR ({geocode_time:.2f}s): {type(e).__name__}: {e}")
+                    print(f"      ERROR ({geocode_time:.2f}s): {type(e).__name__}: {e}")
                     try:
                         cur.execute("INSERT INTO geocoded_addresses (address_id, geocode_status, geocoded_at, geocode_service) VALUES (%s, %s, NOW(), %s) ON CONFLICT (address_id) DO UPDATE SET geocode_status = EXCLUDED.geocode_status", (address_id, 'error', 'CURA'))
                         conn.commit()
@@ -497,11 +548,17 @@ def extract_and_geocode_addresses():
     conn.commit()
     
     # Final status report
-    cur.execute("SELECT geocode_status, COUNT(*) FROM geocoded_addresses GROUP BY geocode_status ORDER BY COUNT(*) DESC")
-    status_counts = cur.fetchall()
-    
-    cur.execute("SELECT COUNT(*) FROM addresses a JOIN party p ON a.address_id = p.address_id WHERE a.address_id NOT IN (SELECT DISTINCT address_id FROM geocoded_addresses WHERE address_id IS NOT NULL)")
-    remaining_addresses = cur.fetchone()[0]
+    cur.execute("SELECT to_regclass('public.geocoded_addresses')")
+    has_geocoded_addresses = cur.fetchone()[0] is not None
+    if has_geocoded_addresses:
+        cur.execute("SELECT geocode_status, COUNT(*) FROM geocoded_addresses GROUP BY geocode_status ORDER BY COUNT(*) DESC")
+        status_counts = cur.fetchall()
+
+        cur.execute("SELECT COUNT(*) FROM address a JOIN party p ON a.address_id = p.address_id WHERE a.address_id NOT IN (SELECT DISTINCT address_id FROM geocoded_addresses WHERE address_id IS NOT NULL)")
+        remaining_addresses = cur.fetchone()[0]
+    else:
+        status_counts = [("skipped_missing_table", 0)]
+        remaining_addresses = 0
     
     # Get final count of unprocessed case files
     cur.execute("""
@@ -729,7 +786,7 @@ def extract_case_data_with_xml_parser(html_content, case_number):
 
             case_data['attorneys'].append(attorney_data)
 
-        print(f"  ✅ Extracted: {len(case_data['parties'])} parties, {len(case_data['attorneys'])} attorneys, {address_counter} addresses")
+        print(f"  Extracted: {len(case_data['parties'])} parties, {len(case_data['attorneys'])} attorneys, {address_counter} addresses")
         return case_data
 
     except Exception as e:
@@ -799,14 +856,12 @@ with DAG(
         python_callable=parse_staged_html_to_models,
     )
 
-    task_batch_stream >> task_parse_and_insert
-    
     task_extract_addresses = PythonOperator(
         task_id="extract_and_geocode_addresses", 
         python_callable=extract_and_geocode_addresses
     )
 
     # set task dependencies
-    task_batch_html >> task_extract_addresses
+    task_batch_html >> task_parse_and_insert >> task_extract_addresses
     
     
