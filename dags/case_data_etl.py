@@ -161,7 +161,7 @@ def extract_and_geocode_addresses():
     start_time = time.time()
     max_runtime = 4 * 60
     extraction_time_limit = 60
-    geocoding_time_limit = 2.5 * 60  
+    geocoding_time_limit = 3 * 60  # Increased from 2.5 to 3 minutes for more geocoding  
     
     # First, get the total count of unprocessed cases
     cur.execute("""
@@ -389,13 +389,13 @@ def extract_and_geocode_addresses():
             WHERE a.address_id NOT IN (
                 SELECT DISTINCT address_id 
                 FROM geocoded_addresses 
-                WHERE geocode_status IN ('success', 'timeout', 'failed', 'skipped_po_box')
+                WHERE geocode_status IN ('success', 'failed', 'skipped_po_box', 'timeout')
                 AND address_id IS NOT NULL
             )
             AND a.address_line1 IS NOT NULL
             AND a.address_line1 != ''
             ORDER BY a.created_at ASC
-            LIMIT 10
+            LIMIT 25
         """)
         
         addresses_to_geocode = cur.fetchall()
@@ -472,8 +472,9 @@ def extract_and_geocode_addresses():
                         print(f"        SUCCESS - Stored in database")
                     else:
                         status = result.get('status', 'unknown')
+                        failed_status = 'failed' if status != 'success' else status
                         print(f"        CURA RESPONSE ({geocode_time:.2f}s): Status={status}")
-                        cur.execute("INSERT INTO geocoded_addresses (address_id, geocode_status, geocoded_at, geocode_service) VALUES (%s, %s, NOW(), %s) ON CONFLICT (address_id) DO UPDATE SET geocode_status = EXCLUDED.geocode_status", (address_id, status, 'CURA'))
+                        cur.execute("INSERT INTO geocoded_addresses (address_id, geocode_status, geocoded_at, geocode_service) VALUES (%s, %s, NOW(), %s) ON CONFLICT (address_id) DO UPDATE SET geocode_status = EXCLUDED.geocode_status", (address_id, failed_status, 'CURA'))
                     
                     conn.commit()
                     time.sleep(0.1)
