@@ -9,11 +9,6 @@ __pycache__/
 # raw parser file
 utils/parser_updated.py
 
-# Manual scripts (ignore when committing)
-cura_geocode_manual.py
-manual_address_update.py
-test_geocoding.py
-
 # Log files
 *.log
 logs/
