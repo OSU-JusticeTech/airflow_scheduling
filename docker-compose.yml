@@ -55,7 +55,7 @@ services:
       - ${CASES_HOST_DIR:-./cases}:/opt/cases:ro
     command: >
       bash -c "
-      mkdir -p /opt/airflow/logs /opt/airflow/logs/scheduler &&
+      mkdir -p /opt/airflow/logs /opt/airflow/logs/scheduler /opt/airflow/project/ocr/raw_text /opt/airflow/project/ocr/texts &&
       python /opt/airflow/project/manage.py migrate --noinput &&
       python /opt/airflow/project/utils/bootstrap_schema.py &&
       airflow db migrate &&
@@ -113,7 +113,7 @@ services:
       - "8080:8080"
     command: >
       bash -c "
-      mkdir -p /opt/airflow/logs /opt/airflow/logs/scheduler &&
+      mkdir -p /opt/airflow/logs /opt/airflow/logs/scheduler /opt/airflow/project/ocr/raw_text /opt/airflow/project/ocr/texts &&
       exec airflow webserver
       "
 
@@ -159,7 +159,7 @@ services:
       - ${CASES_HOST_DIR:-./cases}:/opt/cases:ro
     command: >
       bash -c "
-      mkdir -p /opt/airflow/logs /opt/airflow/logs/scheduler &&
+      mkdir -p /opt/airflow/logs /opt/airflow/logs/scheduler /opt/airflow/project/ocr/raw_text /opt/airflow/project/ocr/texts &&
       exec airflow scheduler
       "
 
