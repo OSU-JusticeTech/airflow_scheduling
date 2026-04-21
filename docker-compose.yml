@@ -25,6 +25,7 @@ services:
     environment:
       AIRFLOW__CORE__LOAD_EXAMPLES: "False"
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_WEBSERVER_SECRET_KEY:-change-this-to-a-long-random-string}
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${DB_USER:-airflow}:${DB_PASSWORD:-airflow}@postgres:5432/${DB_NAME:-justicetech_db}
       AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/project/dags
       AIRFLOW__CORE__PLUGINS_FOLDER: /opt/airflow/project/plugins
@@ -80,6 +81,7 @@ services:
     environment:
       AIRFLOW__CORE__LOAD_EXAMPLES: "False"
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_WEBSERVER_SECRET_KEY:-change-this-to-a-long-random-string}
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${DB_USER:-airflow}:${DB_PASSWORD:-airflow}@postgres:5432/${DB_NAME:-justicetech_db}
       AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/project/dags
       AIRFLOW__CORE__PLUGINS_FOLDER: /opt/airflow/project/plugins
@@ -127,6 +129,7 @@ services:
     environment:
       AIRFLOW__CORE__LOAD_EXAMPLES: "False"
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_WEBSERVER_SECRET_KEY:-change-this-to-a-long-random-string}
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${DB_USER:-airflow}:${DB_PASSWORD:-airflow}@postgres:5432/${DB_NAME:-justicetech_db}
       AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/project/dags
       AIRFLOW__CORE__PLUGINS_FOLDER: /opt/airflow/project/plugins
