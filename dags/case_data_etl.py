@@ -26,7 +26,6 @@ try:
 except ImportError:
     print("ERROR: Could not import XML parser - import failed at module load time")
     XML_PARSER_AVAILABLE = False
-from utils.load_parsed_data import parse_and_insert_from_db
 
 BATCH_SIZE = 1000
 # under public schema now 
@@ -793,15 +792,6 @@ def extract_addresses_simple(html_content, case_number):
     
     return addresses[:5] 
 
-
-
-def parse_staged_html_to_models(**context):
-    dag_run = context.get("dag_run")
-    dag_run_id = dag_run.run_id if dag_run else None
-    task = context.get("task")
-    task_id = task.task_id if task else None
-    parse_and_insert_from_db(batch_size=BATCH_SIZE, dag_run_id=dag_run_id, task_id=task_id)
-
 with DAG(
     dag_id="batch_cases_to_postgres",
     start_date=datetime(2025, 10, 22),
@@ -823,10 +813,6 @@ with DAG(
         python_callable=batch_html_to_postgres
     )
 
-    task_parse_and_insert = PythonOperator(
-        task_id="parse_html_to_models",
-        python_callable=parse_staged_html_to_models,
-    )
     
     task_extract_addresses = PythonOperator(
         task_id="extract_and_geocode_addresses", 
@@ -834,6 +820,6 @@ with DAG(
     )
 
     # set task dependencies
-    task_batch_html >> task_parse_and_insert >> task_extract_addresses
+    task_batch_html >> task_extract_addresses
     
     

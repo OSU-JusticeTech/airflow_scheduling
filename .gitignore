@@ -30,6 +30,8 @@ logs/
 # Environment files (if not already ignored)
 .env
 .env.local
+airflow.cfg
+airflow.cfg.backup
 
 # Distribution / packaging
 .Python
