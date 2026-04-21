@@ -1,0 +1,15 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.git/
+.gitignore
+logs/
+airflow.cfg
+airflow.cfg.backup
+*.sqlite
+*.db
+.DS_Store

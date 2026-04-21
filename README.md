@@ -37,7 +37,8 @@ airflow/
 git clone https://github.com/OSU-JusticeTech/airflow_scheduling.git
 cd airflow_scheduling
 ```
-*** update airflow.cfg with correct paths for your enviornment 
+
+For Docker usage, do not edit `airflow.cfg`. Runtime configuration is provided via environment variables (`.env`) and `docker-compose.yml`.
 
 ### 2. Create a Python Virtual Environment
 
@@ -75,6 +76,16 @@ DB_HOST=localhost
 DB_PORT=5432
 DB_NAME=justicetech_db
 
+# Docker/Compose host path to your case files directory
+CASES_HOST_DIR=./cases
+
+# Airflow admin bootstrap
+AIRFLOW_ADMIN_USERNAME=admin
+AIRFLOW_ADMIN_PASSWORD=change_me
+AIRFLOW_ADMIN_FIRSTNAME=Admin
+AIRFLOW_ADMIN_LASTNAME=User
+AIRFLOW_ADMIN_EMAIL=admin@example.com
+
 # CVG OCR DAG settings
 CVG_CASE_DIRS_ROOT=~/Desktop/justicetech/k3s.dranspo.se:8000/data
 CVG_OCR_DIR=./ocr
@@ -90,6 +101,7 @@ CVG_ADDRESS_TIMEOUT_SECONDS=60
 
 `DB_*` variables are used for database connections.
 `CVG_*` variables configure the `cvg_ocr_batch_etl` DAG runtime behavior.
+`CASES_HOST_DIR` defines where your host case files are mounted from.
 
 ## Database Setup
 

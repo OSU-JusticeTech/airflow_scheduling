@@ -1,4 +1,6 @@
 
+from __future__ import annotations
+
 import os
 import re
 import subprocess
@@ -9,12 +11,14 @@ from pathlib import Path
 from airflow import DAG
 from airflow.decorators import task
 from airflow.operators.python import get_current_context
-from dotenv import load_dotenv
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-# load local env vars for dag runtime config
-load_dotenv(PROJECT_ROOT / ".env")
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.append(str(PROJECT_ROOT))
+
+from config.runtime import ensure_project_root_on_path
+
+ensure_project_root_on_path()
 
 
 def _bool_env(name: str, default: bool) -> bool:

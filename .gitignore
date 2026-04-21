@@ -13,6 +13,11 @@ utils/parser_updated.py
 *.log
 logs/
 
+.DS_Store
+__pycache__/
+*.pyc
+logs/
+
 # Database files
 *.db
 *.sqlite
@@ -20,6 +25,8 @@ logs/
 # Environment files (if not already ignored)
 .env
 .env.local
+airflow.cfg
+airflow.cfg.backup
 
 # Distribution / packaging
 .Python

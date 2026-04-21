@@ -1,0 +1,162 @@
+services:
+  postgres:
+    image: postgres:15
+    container_name: justicetech-postgres
+    environment:
+      POSTGRES_USER: ${DB_USER:-airflow}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-airflow}
+      POSTGRES_DB: ${DB_NAME:-justicetech_db}
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-airflow} -d ${DB_NAME:-justicetech_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  airflow-init:
+    build: .
+    container_name: justicetech-airflow-init
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${DB_USER:-airflow}:${DB_PASSWORD:-airflow}@postgres:5432/${DB_NAME:-justicetech_db}
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/project/dags
+      AIRFLOW__CORE__PLUGINS_FOLDER: /opt/airflow/project/plugins
+      AIRFLOW__LOGGING__BASE_LOG_FOLDER: /opt/airflow/logs
+      AIRFLOW__SCHEDULER__CHILD_PROCESS_LOG_DIRECTORY: /opt/airflow/logs/scheduler
+      AIRFLOW_HOME: /opt/airflow
+      PYTHONPATH: /opt/airflow/project
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: ${DB_USER:-airflow}
+      DB_PASSWORD: ${DB_PASSWORD:-airflow}
+      DB_NAME: ${DB_NAME:-justicetech_db}
+      CASES_FILE_DIRECTORY: /opt/cases
+      CVG_CASE_DIRS_ROOT: /opt/cases
+    volumes:
+      - ./dags:/opt/airflow/project/dags
+      - ./plugins:/opt/airflow/project/plugins
+      - ./utils:/opt/airflow/project/utils
+      - ./models:/opt/airflow/project/models
+      - ./db:/opt/airflow/project/db
+      - ./ocr:/opt/airflow/project/ocr
+      - ./alembic:/opt/airflow/project/alembic
+      - ./config:/opt/airflow/project/config
+      - ./courtdata_django:/opt/airflow/project/courtdata_django
+      - ./manage.py:/opt/airflow/project/manage.py:ro
+      - ./simulation.py:/opt/airflow/project/simulation.py:ro
+      - ${CASES_HOST_DIR:-./cases}:/opt/cases:ro
+    command: >
+      bash -c "
+      mkdir -p /opt/airflow/logs /opt/airflow/logs/scheduler &&
+      airflow db migrate &&
+      airflow users create
+      --username ${AIRFLOW_ADMIN_USERNAME:-admin}
+      --password ${AIRFLOW_ADMIN_PASSWORD:-admin}
+      --firstname ${AIRFLOW_ADMIN_FIRSTNAME:-Admin}
+      --lastname ${AIRFLOW_ADMIN_LASTNAME:-User}
+      --role Admin
+      --email ${AIRFLOW_ADMIN_EMAIL:-admin@example.com}
+      || true
+      "
+
+  airflow-webserver:
+    build: .
+    container_name: justicetech-airflow-webserver
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${DB_USER:-airflow}:${DB_PASSWORD:-airflow}@postgres:5432/${DB_NAME:-justicetech_db}
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/project/dags
+      AIRFLOW__CORE__PLUGINS_FOLDER: /opt/airflow/project/plugins
+      AIRFLOW__LOGGING__BASE_LOG_FOLDER: /opt/airflow/logs
+      AIRFLOW__SCHEDULER__CHILD_PROCESS_LOG_DIRECTORY: /opt/airflow/logs/scheduler
+      AIRFLOW_HOME: /opt/airflow
+      PYTHONPATH: /opt/airflow/project
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: ${DB_USER:-airflow}
+      DB_PASSWORD: ${DB_PASSWORD:-airflow}
+      DB_NAME: ${DB_NAME:-justicetech_db}
+      CASES_FILE_DIRECTORY: /opt/cases
+      CVG_CASE_DIRS_ROOT: /opt/cases
+    volumes:
+      - ./dags:/opt/airflow/project/dags
+      - ./plugins:/opt/airflow/project/plugins
+      - ./utils:/opt/airflow/project/utils
+      - ./models:/opt/airflow/project/models
+      - ./db:/opt/airflow/project/db
+      - ./ocr:/opt/airflow/project/ocr
+      - ./alembic:/opt/airflow/project/alembic
+      - ./config:/opt/airflow/project/config
+      - ./courtdata_django:/opt/airflow/project/courtdata_django
+      - ./manage.py:/opt/airflow/project/manage.py:ro
+      - ./simulation.py:/opt/airflow/project/simulation.py:ro
+      - ${CASES_HOST_DIR:-./cases}:/opt/cases:ro
+    ports:
+      - "8080:8080"
+    command: >
+      bash -c "
+      mkdir -p /opt/airflow/logs /opt/airflow/logs/scheduler &&
+      exec airflow webserver
+      "
+
+  airflow-scheduler:
+    build: .
+    container_name: justicetech-airflow-scheduler
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${DB_USER:-airflow}:${DB_PASSWORD:-airflow}@postgres:5432/${DB_NAME:-justicetech_db}
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/project/dags
+      AIRFLOW__CORE__PLUGINS_FOLDER: /opt/airflow/project/plugins
+      AIRFLOW__LOGGING__BASE_LOG_FOLDER: /opt/airflow/logs
+      AIRFLOW__SCHEDULER__CHILD_PROCESS_LOG_DIRECTORY: /opt/airflow/logs/scheduler
+      AIRFLOW_HOME: /opt/airflow
+      PYTHONPATH: /opt/airflow/project
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: ${DB_USER:-airflow}
+      DB_PASSWORD: ${DB_PASSWORD:-airflow}
+      DB_NAME: ${DB_NAME:-justicetech_db}
+      CASES_FILE_DIRECTORY: /opt/cases
+      CVG_CASE_DIRS_ROOT: /opt/cases
+    volumes:
+      - ./dags:/opt/airflow/project/dags
+      - ./plugins:/opt/airflow/project/plugins
+      - ./utils:/opt/airflow/project/utils
+      - ./models:/opt/airflow/project/models
+      - ./db:/opt/airflow/project/db
+      - ./ocr:/opt/airflow/project/ocr
+      - ./alembic:/opt/airflow/project/alembic
+      - ./config:/opt/airflow/project/config
+      - ./courtdata_django:/opt/airflow/project/courtdata_django
+      - ./manage.py:/opt/airflow/project/manage.py:ro
+      - ./simulation.py:/opt/airflow/project/simulation.py:ro
+      - ${CASES_HOST_DIR:-./cases}:/opt/cases:ro
+    command: >
+      bash -c "
+      mkdir -p /opt/airflow/logs /opt/airflow/logs/scheduler &&
+      exec airflow scheduler
+      "
+
+volumes:
+  postgres_data:

@@ -1,6 +1,8 @@
+from __future__ import annotations
+
 from typing_extensions import Self
 from pydantic import BaseModel, model_validator, Field, field_validator, ConfigDict
-from typing import Literal, Union
+from typing import Literal, Optional, Union
 import datetime
 from enum import Enum
 from decimal import Decimal
@@ -96,8 +98,15 @@ class SideName(BaseModel):
 class SideAddress(SideName):
     address: list[str]
     city: str
-    state: Literal[*state_abbreviations]
+    state: str
     zip_: str = Field(..., alias="zip")
+
+    @field_validator("state", mode="after")
+    @classmethod
+    def is_state_abbrev(cls, value: str) -> str:
+        if value not in state_abbreviations:
+            raise ValueError(f"{value} is not a valid state abbreviation")
+        return value
 
     @field_validator("zip_", mode="after")
     @classmethod
@@ -130,9 +139,9 @@ class PublicAttorney(SideName):
 class DocketEntry(BaseModel):
     date: datetime.date
     text: str
-    extra: str | None = None
-    amount: Decimal | None = None
-    balance: Decimal | None = None
+    extra: Optional[str] = None
+    amount: Optional[Decimal] = None
+    balance: Optional[Decimal] = None
 
 
 class Event(BaseModel):
@@ -145,7 +154,7 @@ class Event(BaseModel):
 
 
 class Finance(BaseModel):
-    application: str | Literal["TOTAL"]
+    application: Union[str, Literal["TOTAL"]]
     owed: Decimal
     paid: Decimal
     dismissed: Decimal
@@ -153,7 +162,7 @@ class Finance(BaseModel):
 
 class Disposition(BaseModel):
     code: str
-    date: datetime.date | None = None
+    date: Optional[datetime.date] = None
     judge: str
     status: Literal["CLOSED", "OPEN", "REOPEN (RO)", "POST SENTENCE HEARING", "INACTIVE", "POST JUDGMENT STATUS"]
     status_date: datetime.date
@@ -169,7 +178,7 @@ class Case(BaseModel):
     case_number: str
     parties: list[Union[SideName, SideAddress]]
     docket: list[DocketEntry]
-    attorneys: list[Attorney | PublicAttorney | FakeAttorney | RunningAttorney]
+    attorneys: list[Union[Attorney, PublicAttorney, FakeAttorney, RunningAttorney]]
     finances: list[Finance]
     events: list[Event]
     dispositions: list[Disposition]

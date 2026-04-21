@@ -17,7 +17,7 @@ if not LOG.handlers:
     LOG.addHandler(console_handler)
 
 def parse_and_insert_from_db(batch_size=5, dag_run_id=None, task_id=None):
-    """Parse unprocessed raw_case_data and insert structured data into Postgres."""
+    """Parse unprocessed raw_cases rows and insert structured data into Postgres."""
     print(f"\nStarting data parsing with batch size: {batch_size}\n")
     
     config = create_postgres_config()
@@ -28,9 +28,15 @@ def parse_and_insert_from_db(batch_size=5, dag_run_id=None, task_id=None):
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT file_name, extracted_text
-                FROM public.raw_case_data
-                WHERE parsed IS DISTINCT FROM TRUE
+                SELECT r.case_number, r.raw_html
+                FROM public.raw_cases r
+                WHERE r.raw_html IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM public.cases c
+                      WHERE c.case_number = r.case_number
+                  )
+                ORDER BY r.case_number
                 LIMIT %s
                 """,
                 (batch_size,)
@@ -43,13 +49,13 @@ def parse_and_insert_from_db(batch_size=5, dag_run_id=None, task_id=None):
             if len(rows) == 0:
                 return
 
-            for idx, (file_name, text) in enumerate(rows, start=1):
-                print(f"\nProcessing file {idx}/{len(rows)}: {file_name}")
-                LOG.info("[checkpoint] processing file %d/%d: %s", idx, len(rows), file_name)
+            for idx, (case_number, text) in enumerate(rows, start=1):
+                print(f"\nProcessing case {idx}/{len(rows)}: {case_number}")
+                LOG.info("[checkpoint] processing case %d/%d: %s", idx, len(rows), case_number)
                 parsed = parse_case_html(text)
                 
                 # Display parsed data for validation
-                print(f"\nPARSED DATA for {file_name}:")
+                print(f"\nPARSED DATA for {case_number}:")
                 print(f"   Case Number: {parsed.get('case_number')}")
                 print(f"   Case Title: {parsed.get('case_title')}")
                 print(f"   Case Status: {parsed.get('case_status')}")
@@ -64,25 +70,19 @@ def parse_and_insert_from_db(batch_size=5, dag_run_id=None, task_id=None):
                 try:
                     result = load_case_payload(
                         parsed,
-                        source_id=file_name,
+                        source_id=case_number,
                         dag_run_id=dag_run_id,
                         task_id=task_id,
                     )
                     case_id = result["case_id"]
-
-                    # mark raw data as parsed
-                    cur.execute(
-                        "UPDATE public.raw_case_data SET parsed = TRUE WHERE file_name=%s",
-                        (file_name,)
-                    )
                     conn.commit()
                     print(f"Successfully inserted case #{case_id}\n")
-                    LOG.info("[checkpoint] finished processing file: %s", file_name)
+                    LOG.info("[checkpoint] finished processing case: %s", case_number)
 
                 except Exception as e:
                     conn.rollback()
-                    print(f"Error processing {file_name}: {e}\n")
-                    LOG.error("[error] failed to process file %s: %s", file_name, e, exc_info=True)
+                    print(f"Error processing {case_number}: {e}\n")
+                    LOG.error("[error] failed to process case %s: %s", case_number, e, exc_info=True)
     finally:
         conn.close()
         print("Database connection closed")
