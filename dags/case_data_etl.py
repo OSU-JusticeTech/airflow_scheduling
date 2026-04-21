@@ -419,7 +419,7 @@ def extract_and_geocode_addresses():
         cur.execute("""
             SELECT a.address_id, a.address_line1, a.city, a.state, a.postal_code,
                    'party' as entity_type, p.party_name as entity_name, a.created_at
-            FROM addresses a
+            FROM address a
             JOIN party p ON a.address_id = p.address_id
             WHERE a.address_id NOT IN (
                 SELECT DISTINCT address_id 

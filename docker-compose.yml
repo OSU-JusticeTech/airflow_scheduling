@@ -55,6 +55,8 @@ services:
     command: >
       bash -c "
       mkdir -p /opt/airflow/logs /opt/airflow/logs/scheduler &&
+      python /opt/airflow/project/manage.py migrate --noinput &&
+      python /opt/airflow/project/utils/bootstrap_schema.py &&
       airflow db migrate &&
       airflow users create
       --username ${AIRFLOW_ADMIN_USERNAME:-admin}
